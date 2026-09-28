@@ -1,0 +1,29 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif; background: #e5e7eb; color: #111827; }
+button, input, select { font: inherit; }
+.app-shell { display: grid; grid-template-columns: 360px 1fr; min-height: 100vh; }
+.sidebar { background: #0f172a; color: #e5e7eb; padding: 18px; overflow-y: auto; max-height: 100vh; }
+.sidebar h1 { font-size: 21px; margin: 0 0 18px; }
+.card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+.card h2 { font-size: 15px; margin: 0 0 12px; color: #bfdbfe; }
+label { display: grid; gap: 5px; font-size: 13px; margin-bottom: 10px; }
+input, select { width: 100%; border: 1px solid #475569; border-radius: 7px; padding: 7px 9px; background: #f8fafc; color: #111827; }
+button { border: 1px solid #64748b; background: #334155; color: white; border-radius: 7px; padding: 7px 10px; cursor: pointer; }
+button:hover:not(:disabled) { filter: brightness(1.18); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.primary { background: #2563eb; border-color: #2563eb; width: 100%; }
+.danger { color: #fecaca; border-color: #ef4444; }
+.active { background: #0891b2; border-color: #06b6d4; }
+.button-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 8px; }
+.workspace { min-width: 0; display: flex; flex-direction: column; }
+.toolbar { display: flex; align-items: center; gap: 16px; padding: 12px 18px; background: white; border-bottom: 1px solid #cbd5e1; }
+.toolbar label { display: flex; align-items: center; gap: 8px; margin: 0; width: 280px; }
+.toolbar span { color: #475569; font-size: 13px; white-space: nowrap; }
+.canvas-scroll { overflow: auto; flex: 1; padding: 22px; }
+.map-canvas { display: block; background: white; box-shadow: 0 14px 40px rgba(15, 23, 42, .22); cursor: crosshair; image-rendering: pixelated; }
+.message { margin: 12px 22px 0; padding: 10px 12px; border-radius: 8px; background: #fffbeb; border: 1px solid #f59e0b; }
+.revision-list { display: grid; gap: 7px; }
+.revision { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: #0f172a; border-radius: 8px; padding: 8px; }
+.revision span { display: grid; gap: 2px; font-size: 13px; }
+.revision small { color: #94a3b8; font-size: 11px; }
+.revision button { padding: 5px 8px; font-size: 12px; }

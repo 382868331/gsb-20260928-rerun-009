@@ -6,6 +6,11 @@ class PointModel(BaseModel):
     y: float
 
 
+class PoseModel(PointModel):
+    # Radians; null checkpoints only require passing the position.
+    orientation: float | None = None
+
+
 class ZoneModel(BaseModel):
     id: str
     x: float
@@ -17,8 +22,9 @@ class ZoneModel(BaseModel):
 class MapStateModel(BaseModel):
     origin: PointModel
     forbidden_zones: list[ZoneModel] = Field(default_factory=list)
-    start: PointModel | None = None
-    end: PointModel | None = None
+    start: PoseModel | None = None
+    end: PoseModel | None = None
+    checkpoints: list[PoseModel] = Field(default_factory=list)
     robot_width: float = Field(default=0.5, gt=0)
     robot_length: float = Field(default=0.8, gt=0)
 

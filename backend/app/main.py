@@ -30,8 +30,13 @@ def default_state(map_width: int, map_height: int, resolution: float) -> dict[st
     return {
         "origin": {"x": 0.0, "y": 0.0},
         "forbidden_zones": [],
-        "start": {"x": resolution, "y": resolution},
-        "end": {"x": resolution, "y": map_height * resolution - resolution},
+        "start": {"x": resolution, "y": resolution, "orientation": 0.0},
+        "end": {
+            "x": resolution,
+            "y": map_height * resolution - resolution,
+            "orientation": 0.0,
+        },
+        "checkpoints": [],
         "robot_width": 0.5,
         "robot_length": 0.8,
     }
@@ -175,6 +180,9 @@ async def validate_project(project_id: int, payload: PassageRequestModel) -> dic
             state["origin"],
             state["start"],
             state["end"],
+            start_orientation=state["start"].get("orientation") or 0.0,
+            end_orientation=state["end"].get("orientation"),
+            checkpoints=state.get("checkpoints", []),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

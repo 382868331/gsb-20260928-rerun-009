@@ -1,5 +1,7 @@
 export type Point = { x: number; y: number };
 
+export type Pose = Point & { orientation: number | null };
+
 export type ForbiddenZone = {
   id: string;
   x: number;
@@ -11,8 +13,9 @@ export type ForbiddenZone = {
 export type MapState = {
   origin: Point;
   forbidden_zones: ForbiddenZone[];
-  start: Point | null;
-  end: Point | null;
+  start: Pose | null;
+  end: Pose | null;
+  checkpoints: Pose[];
   robot_width: number;
   robot_length: number;
 };
@@ -37,7 +40,15 @@ export type Version = {
 
 export type ValidationResult = {
   passable: boolean;
+  status:
+    | "passable"
+    | "orientation-unreachable"
+    | "passage-blocked"
+    | "route-not-found"
+    | "start-invalid";
+  failed_stage: string | null;
   reason: string;
   algorithm: string;
   path: Array<Point & { orientation: number }>;
+  angular_resolution: number;
 };

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { ForbiddenZone, MapState, Point, Project, ValidationResult } from "./types";
 
-type Mode = "zone" | "start" | "end";
+type Mode = "zone" | "start" | "end" | "checkpoint";
 
 type Props = {
   project: Project;
@@ -59,11 +59,21 @@ export function MapCanvas({ project, state, scale, result, onChange }: Props) {
     const point = svgPoint(event);
     if (!insideMap(point)) return;
     if (mode === "start") {
-      onChange({ ...state, start: point });
+      onChange({ ...state, start: { ...point, orientation: state.start?.orientation ?? 0 } });
       return;
     }
     if (mode === "end") {
-      onChange({ ...state, end: point });
+      onChange({ ...state, end: { ...point, orientation: state.end?.orientation ?? 0 } });
+      return;
+    }
+    if (mode === "checkpoint") {
+      onChange({
+        ...state,
+        checkpoints: [
+          ...state.checkpoints,
+          { ...point, orientation: 0 },
+        ],
+      });
       return;
     }
     if (!draftPoint) {
@@ -92,6 +102,7 @@ export function MapCanvas({ project, state, scale, result, onChange }: Props) {
           ["zone", "禁行区"],
           ["start", "起点"],
           ["end", "终点"],
+          ["checkpoint", "检查点"],
         ] as Array<[Mode, string]>).map(([value, label]) => (
           <button
             key={value}
@@ -104,7 +115,7 @@ export function MapCanvas({ project, state, scale, result, onChange }: Props) {
             {label}
           </button>
         ))}
-        <span>点击设置；禁行区点击两个对角点</span>
+        <span>点击设置；禁行区点击两个对角点；检查点在侧栏填写指定朝向</span>
       </div>
       <svg
         width={mapWidth * scale}
@@ -146,12 +157,36 @@ export function MapCanvas({ project, state, scale, result, onChange }: Props) {
           {result?.passable && (
             <path d={pathD} fill="none" stroke="#16a34a" strokeWidth={0.08} />
           )}
+          {result?.passable &&
+            result.path.map((pose, index) => (
+              <g
+                key={index}
+                transform={`translate(${pose.x} ${pose.y}) rotate(${(pose.orientation * 180) / Math.PI})`}
+              >
+                <rect x={-0.15} y={-0.3} width={0.3} height={0.6} fill="none" stroke="#15803d" strokeWidth={0.02} />
+              </g>
+            ))}
           {state.start && (
-            <circle cx={state.start.x} cy={state.start.y} r={0.18} fill="#2563eb" />
+            <g transform={`translate(${state.start.x} ${state.start.y}) rotate(${((state.start.orientation ?? 0) * 180) / Math.PI})`}>
+              <circle r={0.18} fill="#2563eb" />
+              <line x1={0} y1={0} x2={0} y2={0.32} stroke="white" strokeWidth={0.05} />
+            </g>
           )}
           {state.end && (
-            <circle cx={state.end.x} cy={state.end.y} r={0.18} fill="#9333ea" />
+            <g transform={`translate(${state.end.x} ${state.end.y}) rotate(${((state.end.orientation ?? 0) * 180) / Math.PI})`}>
+              <circle r={0.18} fill="#9333ea" />
+              <line x1={0} y1={0} x2={0} y2={0.32} stroke="white" strokeWidth={0.05} />
+            </g>
           )}
+          {state.checkpoints.map((checkpoint, index) => (
+            <g
+              key={index}
+              transform={`translate(${checkpoint.x} ${checkpoint.y}) rotate(${((checkpoint.orientation ?? 0) * 180) / Math.PI})`}
+            >
+              <polygon points="0,0.28 0.14,0 -0.14,0" fill="#ea580c" />
+              <text x={0.22} y={-0.12} fontSize={0.3} fill="#9a3412">{index + 1}</text>
+            </g>
+          ))}
           {draftPoint && <circle cx={draftPoint.x} cy={draftPoint.y} r={0.12} fill="#ea580c" />}
           <line
             x1={origin.x}

@@ -147,6 +147,32 @@ export default function App() {
     setState({ ...state, forbidden_zones: state.forbidden_zones.filter((zone) => zone.id !== id) });
   }
 
+  function removeCheckpoint(index: number) {
+    if (!state) return;
+    setState({
+      ...state,
+      checkpoints: state.checkpoints.filter((_, item) => item !== index),
+    });
+  }
+
+  function updateCheckpoint(index: number, orientation: number | null) {
+    if (!state) return;
+    setState({
+      ...state,
+      checkpoints: state.checkpoints.map((checkpoint, item) =>
+        item === index ? { ...checkpoint, orientation } : checkpoint
+      ),
+    });
+  }
+
+  const statusLabels: Record<string, string> = {
+    passable: "可以到达且满足全部姿态要求",
+    "orientation-unreachable": "位置可达但无法调整到指定朝向",
+    "passage-blocked": "通道过窄，整机外廓无法通过",
+    "route-not-found": "尚未找到无碰撞路线",
+    "start-invalid": "起点处机器人外廓与障碍冲突",
+  };
+
   return (
     <main>
       <header>
@@ -225,12 +251,41 @@ export default function App() {
               ))}
             </section>
             <section>
+              <h2>起点姿态</h2>
+              <label>起点朝向（度）<input type="number" step="5" value={Math.round(((state.start?.orientation ?? 0) * 180) / Math.PI)} onChange={(e) => state.start && setState({ ...state, start: { ...state.start, orientation: (Number(e.target.value) * Math.PI) / 180 } })} /></label>
+              <label>终点朝向（度，空=不要求）<input type="number" step="5" value={state.end?.orientation == null ? "" : Math.round((state.end.orientation * 180) / Math.PI)} onChange={(e) => state.end && setState({ ...state, end: { ...state.end, orientation: e.target.value === "" ? null : (Number(e.target.value) * Math.PI) / 180 } })} /></label>
+              <p className="hint">路线完成同时要求终点位置和朝向；同点转向按整个旋转扫掠检查碰撞。</p>
+            </section>
+            <section>
+              <h2>朝向检查点</h2>
+              {state.checkpoints.length === 0 && <p className="hint">选择“检查点”工具后在画布点击；留空朝向表示只经过该位置。</p>}
+              {state.checkpoints.map((checkpoint, index) => (
+                <div key={index} className="zone-row">
+                  <span>
+                    #{index + 1}（{checkpoint.x.toFixed(1)}, {checkpoint.y.toFixed(1)}）
+                    <input
+                      type="number"
+                      step="5"
+                      placeholder="朝向°（空=任意）"
+                      value={checkpoint.orientation == null ? "" : Math.round((checkpoint.orientation * 180) / Math.PI)}
+                      onChange={(event) => updateCheckpoint(
+                        index,
+                        event.target.value === "" ? null : (Number(event.target.value) * Math.PI) / 180
+                      )}
+                    />
+                  </span>
+                  <button onClick={() => removeCheckpoint(index)}>删除</button>
+                </div>
+              ))}
+            </section>
+            <section>
               <h2>通过性</h2>
               <button disabled={busy} onClick={handleValidate}>检查起点到终点</button>
               {result && (
                 <div className={result.passable ? "pass" : "fail"}>
-                  <strong>{result.passable ? "可以通过" : "不能通过"}</strong>
+                  <strong>{statusLabels[result.status] ?? (result.passable ? "可以通过" : "不能通过")}</strong>
                   <p>{result.reason}</p>
+                  {result.failed_stage && <small>失败阶段：{result.failed_stage}</small>}
                   <small>算法版本：{result.algorithm}</small>
                 </div>
               )}

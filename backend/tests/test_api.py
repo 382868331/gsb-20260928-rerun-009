@@ -55,6 +55,43 @@ async def test_project_persistence_keeps_validation_result(client, tmp_path):
 
 
 @pytest.mark.anyio
+async def test_orientation_and_checkpoints_round_trip_after_reopen(client, tmp_path):
+    import math
+
+    created = (await client.post(
+        "/api/projects",
+        data={"name": "poses", "resolution": "0.1"},
+    )).json()
+    project_id = created["id"]
+    state = created["state"]
+    state["start"] = {"x": 0.5, "y": 0.5, "orientation": 0.0}
+    state["end"] = {"x": 0.5, "y": 0.5, "orientation": math.pi / 2}
+    state["robot_width"] = 0.3
+    state["robot_length"] = 0.5
+    state["checkpoints"] = [
+        {"x": 1.0, "y": 1.0, "orientation": None},
+    ]
+    await client.put(
+        f"/api/projects/{project_id}", json={"state": state, "note": "pose task"}
+    )
+    first = (await client.post(
+        f"/api/projects/{project_id}/validate", json={"state": state}
+    )).json()
+
+    async with await refresh_client(tmp_path) as reopened_client:
+        loaded = (await reopened_client.get(f"/api/projects/{project_id}")).json()
+        assert loaded["state"]["start"]["orientation"] == 0.0
+        assert loaded["state"]["checkpoints"][0]["orientation"] is None
+        second = (await reopened_client.post(
+            f"/api/projects/{project_id}/validate", json={"state": loaded["state"]}
+        )).json()
+    assert second["status"] == first["status"]
+    assert second["algorithm"] == first["algorithm"]
+    if first["passable"]:
+        assert abs(second["path"][-1]["orientation"] - math.pi / 2) < 0.2
+
+
+@pytest.mark.anyio
 async def test_versions_preserve_original_and_restore_state(client):
     project = (await client.post("/api/projects", data={"name": "versions"})).json()
     state = project["state"]

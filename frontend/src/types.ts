@@ -13,6 +13,8 @@ export type MapState = {
   forbidden_zones: ForbiddenZone[];
   start: Point | null;
   end: Point | null;
+  start_orientation: number;
+  end_orientation: number;
   robot_width: number;
   robot_length: number;
 };
@@ -36,8 +38,19 @@ export type Version = {
 };
 
 export type ValidationResult = {
+  id?: number;
   passable: boolean;
   reason: string;
   algorithm: string;
   path: Array<Point & { orientation: number }>;
+};
+
+export type CheckRecord = {
+  id: number;
+  passable: boolean;
+  reason: string;
+  algorithm: string;
+  state: MapState;
+  result: ValidationResult;
+  created_at: string;
 };

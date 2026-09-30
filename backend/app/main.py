@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 from .geometry import validate_passage
-from .maps import image_to_grid, make_sample_map
+from .maps import image_to_grid, make_sample_map, make_turn_sample_map
 from .models import PassageRequestModel, ProjectUpdateModel, VersionCreateModel
 from .storage import Store
 
@@ -26,12 +26,27 @@ app.add_middleware(
 store = Store(DB_PATH)
 
 
-def default_state(map_width: int, map_height: int, resolution: float) -> dict[str, Any]:
+def default_state(
+    map_width: int, map_height: int, resolution: float, sample_kind: str = "doors"
+) -> dict[str, Any]:
+    if sample_kind == "turn":
+        return {
+            "origin": {"x": 0.0, "y": 0.0},
+            "forbidden_zones": [],
+            "start": {"x": 0.4, "y": map_height * resolution - 0.9},
+            "end": {"x": 1.8, "y": 0.6},
+            "start_orientation": 0.0,
+            "end_orientation": 90.0,
+            "robot_width": 0.6,
+            "robot_length": 0.8,
+        }
     return {
         "origin": {"x": 0.0, "y": 0.0},
         "forbidden_zones": [],
         "start": {"x": resolution, "y": resolution},
         "end": {"x": resolution, "y": map_height * resolution - resolution},
+        "start_orientation": 0.0,
+        "end_orientation": 0.0,
         "robot_width": 0.5,
         "robot_length": 0.8,
     }
@@ -39,6 +54,9 @@ def default_state(map_width: int, map_height: int, resolution: float) -> dict[st
 
 def serialize_project(row) -> dict[str, Any]:
     map_data = json.loads(row["map_data"])
+    state = json.loads(row["state"])
+    state.setdefault("start_orientation", 0.0)
+    state.setdefault("end_orientation", 0.0)
     return {
         "id": row["id"],
         "name": row["name"],
@@ -46,7 +64,7 @@ def serialize_project(row) -> dict[str, Any]:
         "threshold": row["threshold"],
         "width": row["width"],
         "height": row["height"],
-        "state": json.loads(row["state"]),
+        "state": state,
         "grid": map_data["grid"],
         "original_url": f"/api/projects/{row['id']}/original",
         "created_at": row["created_at"],
@@ -69,6 +87,7 @@ async def create_project(
     name: str = Form(...),
     resolution: float = Form(0.1),
     threshold: int = Form(128),
+    sample_kind: str = Form("doors"),
     file: UploadFile | None = File(None),
 ) -> dict[str, Any]:
     if resolution <= 0:
@@ -82,12 +101,16 @@ async def create_project(
         width = normalized["width"]
         height = normalized["height"]
     else:
-        image_data, grid = make_sample_map()
-        filename = "sample-doors.png"
+        if sample_kind == "turn":
+            image_data, grid = make_turn_sample_map(open_corner=False)
+            filename = "sample-tight-turn.png"
+        else:
+            image_data, grid = make_sample_map()
+            filename = "sample-doors.png"
         content_type = "image/png"
         height = len(grid)
         width = len(grid[0])
-    state = default_state(width, height, resolution)
+    state = default_state(width, height, resolution, sample_kind if file is None else "doors")
     project_id = store.create_project(
         name,
         str(filename),
@@ -156,6 +179,32 @@ async def restore_version(version_id: int) -> dict[str, Any]:
     return {"state": state}
 
 
+@app.get("/api/projects/{project_id}/checks")
+async def list_checks(project_id: int) -> list[dict[str, Any]]:
+    if store.get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    checks = []
+    for row in store.list_checks(project_id):
+        item = dict(row)
+        item["state"] = json.loads(item["state"])
+        item["result"] = json.loads(item["result"])
+        item["passable"] = bool(item["passable"])
+        checks.append(item)
+    return checks
+
+
+@app.get("/api/checks/{check_id}")
+async def get_check(check_id: int) -> dict[str, Any]:
+    row = store.get_check(check_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="check not found")
+    item = dict(row)
+    item["state"] = json.loads(item["state"])
+    item["result"] = json.loads(item["result"])
+    item["passable"] = bool(item["passable"])
+    return item
+
+
 @app.post("/api/projects/{project_id}/validate")
 async def validate_project(project_id: int, payload: PassageRequestModel) -> dict[str, Any]:
     row = store.get_project(project_id)
@@ -175,7 +224,10 @@ async def validate_project(project_id: int, payload: PassageRequestModel) -> dic
             state["origin"],
             state["start"],
             state["end"],
+            state.get("start_orientation", 0.0),
+            state.get("end_orientation", 0.0),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result["id"] = store.create_check(project_id, state, result)
     return result

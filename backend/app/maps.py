@@ -47,3 +47,31 @@ def make_sample_map() -> tuple[bytes, list[list[bool]]]:
     image.save(out, format="PNG")
     grid = (pixels.min(axis=2) <= 128).tolist()
     return out.getvalue(), grid
+
+
+def make_turn_sample_map(open_corner: bool = False) -> tuple[bytes, list[list[bool]]]:
+    """L-shaped corridor: open straight sections, with a tight or roomy corner."""
+    width = height = 36
+    pixels = np.full((height, width, 3), 20, dtype=np.uint8)
+
+    if open_corner:
+        pixels[0:12, 0:24] = 245
+        pixels[0:height - 2, 12:24] = 245
+    else:
+        pixels[5:13, 0:23] = 245
+        pixels[5:height - 2, 15:23] = 245
+        pixels[5:13, 23:height] = 20
+        pixels[13:height - 2, 0:15] = 20
+        # Keep both straight arms a full 0.8 m wide away from the corner,
+        # while locally shaving the corner pocket needed by the swept body.
+        pixels[12:16, 22:23] = 20
+        pixels[12:13, 14:15] = 20
+
+    scale = 20
+    image = Image.fromarray(pixels, mode="RGB").resize(
+        (width * scale, height * scale), Image.Resampling.NEAREST
+    )
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    grid = (pixels.min(axis=2) <= 128).tolist()
+    return out.getvalue(), grid

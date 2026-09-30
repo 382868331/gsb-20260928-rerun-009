@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 
-ALGORITHM_VERSION = "rectangle-footprint-bfs-v1"
+ALGORITHM_VERSION = "continuous-footprint-se2-bfs-v2"
+HEADING_BINS = 72
+ROTATION_SUBDIVISIONS = 3
 
 
 @dataclass(frozen=True)
@@ -25,22 +28,77 @@ def grid_to_world(row: int, col: int, resolution: float, height_cells: int, orig
     return Point(origin.x + col * resolution, origin.y + (height_cells - 1 - row) * resolution)
 
 
-def _free_centers(occupancy: np.ndarray, row_span: int, col_span: int) -> np.ndarray:
-    rows, cols = occupancy.shape
-    integral = np.zeros((rows + 1, cols + 1), dtype=np.int32)
-    integral[1:, 1:] = np.cumsum(np.cumsum(occupancy.astype(np.int32), axis=0), axis=1)
-    free = np.zeros_like(occupancy, dtype=bool)
-    blocked = (
-        integral[row_span:, col_span:]
-        - integral[:-row_span, col_span:]
-        - integral[row_span:, :-col_span]
-        + integral[:-row_span, :-col_span]
+def _rotated_rectangle_mask(
+    robot_width: float, robot_length: float, heading: float, resolution: float
+) -> np.ndarray:
+    corners = np.array([
+        [-robot_length / 2, -robot_width / 2],
+        [robot_length / 2, -robot_width / 2],
+        [robot_length / 2, robot_width / 2],
+        [-robot_length / 2, robot_width / 2],
+    ])
+    cosine, sine = math.cos(heading), math.sin(heading)
+    half_diagonal = math.hypot(robot_length, robot_width) / 2 + resolution
+    extent = int(math.ceil(half_diagonal / resolution))
+    axis = np.arange(-extent, extent + 1)
+    cells_x, cells_y = np.meshgrid(axis, axis)
+    world_x = cells_x * resolution
+    world_y = -cells_y * resolution
+
+    local_x = world_x * cosine + world_y * sine
+    local_y = -world_x * sine + world_y * cosine
+    mask = (
+        (local_x >= -robot_length / 2 - resolution / 2)
+        & (local_x <= robot_length / 2 + resolution / 2)
+        & (local_y >= -robot_width / 2 - resolution / 2)
+        & (local_y <= robot_width / 2 + resolution / 2)
     )
-    valid_windows = blocked == 0
-    before_rows = (row_span - 1) // 2
-    before_cols = (col_span - 1) // 2
-    free[before_rows:before_rows + valid_windows.shape[0], before_cols:before_cols + valid_windows.shape[1]] = valid_windows
-    return free
+    rows = cells_y[mask]
+    cols = cells_x[mask]
+    return np.column_stack([rows, cols]).astype(np.int64)
+
+
+class FootprintField:
+    def __init__(self, occupancy: np.ndarray, robot_width: float, robot_length: float, resolution: float):
+        self.occupancy = occupancy
+        self.rows, self.cols = occupancy.shape
+        self.robot_width = robot_width
+        self.robot_length = robot_length
+        self.resolution = resolution
+        self.angle_step = 2.0 * math.pi / HEADING_BINS
+        self.bin_offsets = [
+            _rotated_rectangle_mask(robot_width, robot_length, layer * self.angle_step, resolution)
+            for layer in range(HEADING_BINS)
+        ]
+        self.cache: dict[tuple[int, int], bool] = {}
+
+    def offsets_clear(self, row: float, col: float, offsets: np.ndarray) -> bool:
+        sample_rows = np.rint(row + offsets[:, 0]).astype(np.int64)
+        sample_cols = np.rint(col + offsets[:, 1]).astype(np.int64)
+        inside = (
+            (sample_rows >= 0)
+            & (sample_rows < self.rows)
+            & (sample_cols >= 0)
+            & (sample_cols < self.cols)
+        )
+        if not bool(inside.all()):
+            return False
+        return not bool(self.occupancy[sample_rows, sample_cols].any())
+
+    def free_bin(self, layer: int, row: int, col: int) -> bool:
+        key = (layer, row * self.cols + col)
+        try:
+            return self.cache[key]
+        except KeyError:
+            result = self.offsets_clear(row, col, self.bin_offsets[layer])
+            self.cache[key] = result
+            return result
+
+    def heading_clear(self, row: float, col: float, heading: float) -> bool:
+        offsets = _rotated_rectangle_mask(
+            self.robot_width, self.robot_length, heading, self.resolution
+        )
+        return self.offsets_clear(row, col, offsets)
 
 
 def build_occupancy(
@@ -80,6 +138,8 @@ def validate_passage(
     origin: dict[str, float],
     start: dict[str, float],
     end: dict[str, float],
+    start_orientation: float = 0.0,
+    end_orientation: float = 0.0,
 ) -> dict[str, Any]:
     if robot_width <= 0 or robot_length <= 0:
         raise ValueError("robot dimensions must be positive")
@@ -96,67 +156,80 @@ def validate_passage(
     if not (0 <= end_row < rows and 0 <= end_col < cols):
         raise ValueError("end is outside the map")
 
-    length_cells = max(1, int(np.ceil(robot_length / resolution)))
-    width_cells = max(1, int(np.ceil(robot_width / resolution)))
-    orientations = (0.0, 1.5707963267948966)
-    free = np.stack(
-        [
-            _free_centers(occupancy, length_cells, width_cells),
-            _free_centers(occupancy, width_cells, length_cells),
-        ]
-    )
+    field = FootprintField(occupancy, robot_width, robot_length, resolution)
+    angle_step = 2.0 * math.pi / HEADING_BINS
 
-    if not free[:, start_row, start_col].any():
+    def nearest_layer(degrees: float) -> int:
+        radians = math.radians(degrees) % (2.0 * math.pi)
+        return int(round(radians / angle_step)) % HEADING_BINS
+
+    start_layer = nearest_layer(start_orientation)
+    end_layer = nearest_layer(end_orientation)
+
+    if not field.free_bin(start_layer, start_row, start_col):
         return {
             "passable": False,
-            "reason": "start cannot contain the complete robot footprint",
+            "reason": "start cannot contain the complete robot footprint at the requested heading",
             "algorithm": ALGORITHM_VERSION,
             "path": [],
         }
-    if not free[:, end_row, end_col].any():
+    if not field.free_bin(end_layer, end_row, end_col):
         return {
             "passable": False,
-            "reason": "end cannot contain the complete robot footprint",
+            "reason": "end cannot contain the complete robot footprint at the requested heading",
             "algorithm": ALGORITHM_VERSION,
             "path": [],
         }
 
-    dist = np.full((2, rows, cols), -1, dtype=np.int32)
-    previous: dict[tuple[int, int, int], tuple[int, int, int] | None] = {}
-    queue: list[tuple[int, int, int]] = []
-    for layer in range(2):
-        if free[layer, start_row, start_col]:
-            dist[layer, start_row, start_col] = 0
-            previous[(layer, start_row, start_col)] = None
-            queue.append((layer, start_row, start_col))
-
+    start_node = (start_layer, start_row, start_col)
+    distance = {start_node: 0}
+    previous: dict[tuple[int, int, int], tuple[int, int, int] | None] = {start_node: None}
+    queue = [start_node]
     head = 0
     target = None
+
     while head < len(queue):
         layer, row, col = queue[head]
+        node = (layer, row, col)
         head += 1
-        if row == end_row and col == end_col:
-            target = (layer, row, col)
+        if row == end_row and col == end_col and layer == end_layer:
+            target = node
             break
-        for next_layer, next_row, next_col in (
-            (layer, row - 1, col),
-            (layer, row + 1, col),
-            (layer, row, col - 1),
-            (layer, row, col + 1),
-            (1 - layer, row, col),
-        ):
-            if not (0 <= next_row < rows and 0 <= next_col < cols):
+
+        for delta_row, delta_col in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            next_row, next_col = row + delta_row, col + delta_col
+            next_node = (layer, next_row, next_col)
+            if not (0 <= next_row < rows and 0 <= next_col < cols) or next_node in distance:
                 continue
-            if not free[next_layer, next_row, next_col] or dist[next_layer, next_row, next_col] != -1:
+            heading = layer * angle_step
+            midpoint_clear = field.heading_clear(
+                row + 0.5 * delta_row, col + 0.5 * delta_col, heading
+            )
+            if midpoint_clear and field.free_bin(layer, next_row, next_col):
+                distance[next_node] = distance[node] + 1
+                previous[next_node] = node
+                queue.append(next_node)
+
+        current_heading = layer * angle_step
+        for delta_layer in (-1, 1):
+            next_layer = (layer + delta_layer) % HEADING_BINS
+            next_node = (next_layer, row, col)
+            if next_node in distance:
                 continue
-            dist[next_layer, next_row, next_col] = dist[layer, row, col] + 1
-            previous[(next_layer, next_row, next_col)] = (layer, row, col)
-            queue.append((next_layer, next_row, next_col))
+            fractions = (index / ROTATION_SUBDIVISIONS for index in range(ROTATION_SUBDIVISIONS + 1))
+            sweep_clear = all(
+                field.heading_clear(row, col, current_heading + delta_layer * fraction * angle_step)
+                for fraction in fractions
+            )
+            if sweep_clear and field.free_bin(next_layer, row, col):
+                distance[next_node] = distance[node] + 1
+                previous[next_node] = node
+                queue.append(next_node)
 
     if target is None:
         return {
             "passable": False,
-            "reason": "no collision-free center trajectory exists for the complete rectangle footprint",
+            "reason": "no collision-free trajectory exists while continuously checking the swept complete footprint",
             "algorithm": ALGORITHM_VERSION,
             "path": [],
         }
@@ -166,12 +239,16 @@ def validate_passage(
     while current is not None:
         layer, row, col = current
         point = grid_to_world(row, col, resolution, rows, map_origin)
-        nodes.append({"x": point.x, "y": point.y, "orientation": orientations[layer]})
+        nodes.append({
+            "x": point.x,
+            "y": point.y,
+            "orientation": (layer * angle_step) % (2.0 * math.pi),
+        })
         current = previous[current]
     nodes.reverse()
     return {
         "passable": True,
-        "reason": "collision-free passage exists for the complete rectangle footprint",
+        "reason": "collision-free passage exists while continuously checking the swept complete footprint",
         "algorithm": ALGORITHM_VERSION,
         "path": nodes,
     }

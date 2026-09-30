@@ -41,6 +41,17 @@ class Store:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES projects(id)
                 );
+                CREATE TABLE IF NOT EXISTS checks (
+                    id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    passable INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    algorithm TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(id)
+                );
                 """
             )
 
@@ -146,3 +157,42 @@ class Store:
                 (version["state"], utc_now(), version["project_id"]),
             )
         return state
+
+    def create_check(
+        self, project_id: int, state: dict[str, Any], result: dict[str, Any]
+    ) -> int:
+        now = utc_now()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO checks
+                (project_id, passable, reason, algorithm, state, result, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    1 if result["passable"] else 0,
+                    result["reason"],
+                    result["algorithm"],
+                    json.dumps(state),
+                    json.dumps(result),
+                    now,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def list_checks(self, project_id: int) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return list(
+                conn.execute(
+                    """
+                    SELECT id, project_id, passable, reason, algorithm, state, result, created_at
+                    FROM checks WHERE project_id = ? ORDER BY id DESC
+                    """,
+                    (project_id,),
+                )
+            )
+
+    def get_check(self, check_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM checks WHERE id = ?", (check_id,)).fetchone()

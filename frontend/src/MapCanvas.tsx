@@ -37,6 +37,28 @@ export function MapCanvas({ project, state, scale, result, onChange }: Props) {
   const pathD = pathPoints
     .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
     .join(" ");
+  const footprintStep = Math.max(1, Math.floor(pathPoints.length / 24));
+  const footprintNodes = pathPoints.filter(
+    (_, index) => index % footprintStep === 0 || index === pathPoints.length - 1
+  );
+
+  function footprintPolygon(point: { x: number; y: number; orientation: number }) {
+    const halfLength = state.robot_length / 2;
+    const halfWidth = state.robot_width / 2;
+    const corners = [
+      [-halfLength, -halfWidth],
+      [halfLength, -halfWidth],
+      [halfLength, halfWidth],
+      [-halfLength, halfWidth],
+    ];
+    const cosine = Math.cos(point.orientation);
+    const sine = Math.sin(point.orientation);
+    return corners.map(([lx, ly]) => {
+      const x = point.x + lx * cosine - ly * sine;
+      const y = point.y + lx * sine + ly * cosine;
+      return x + "," + y;
+    }).join(" ");
+  }
 
   function svgPoint(event: React.MouseEvent<SVGSVGElement>): Point {
     const svg = event.currentTarget;
@@ -146,11 +168,44 @@ export function MapCanvas({ project, state, scale, result, onChange }: Props) {
           {result?.passable && (
             <path d={pathD} fill="none" stroke="#16a34a" strokeWidth={0.08} />
           )}
+          {result?.passable && footprintNodes.map((point, index) => (
+            <polygon
+              key={index}
+              points={footprintPolygon(point)}
+              fill="rgba(22,163,74,0.12)"
+              stroke="#15803d"
+              strokeWidth={0.015}
+            />
+          ))}
           {state.start && (
-            <circle cx={state.start.x} cy={state.start.y} r={0.18} fill="#2563eb" />
+            <>
+              <polygon
+                points={footprintPolygon({
+                  x: state.start.x,
+                  y: state.start.y,
+                  orientation: (state.start_orientation * Math.PI) / 180,
+                })}
+                fill="rgba(37,99,235,0.18)"
+                stroke="#2563eb"
+                strokeWidth={0.02}
+              />
+              <circle cx={state.start.x} cy={state.start.y} r={0.08} fill="#2563eb" />
+            </>
           )}
           {state.end && (
-            <circle cx={state.end.x} cy={state.end.y} r={0.18} fill="#9333ea" />
+            <>
+              <polygon
+                points={footprintPolygon({
+                  x: state.end.x,
+                  y: state.end.y,
+                  orientation: (state.end_orientation * Math.PI) / 180,
+                })}
+                fill="rgba(147,51,234,0.18)"
+                stroke="#9333ea"
+                strokeWidth={0.02}
+              />
+              <circle cx={state.end.x} cy={state.end.y} r={0.08} fill="#9333ea" />
+            </>
           )}
           {draftPoint && <circle cx={draftPoint.x} cy={draftPoint.y} r={0.12} fill="#ea580c" />}
           <line

@@ -1,4 +1,4 @@
-import type { MapState, Project, ValidationResult, Version } from "./types";
+import type { CheckRecord, MapState, Project, ValidationResult, Version } from "./types";
 
 async function jsonFetch(url: string, init?: RequestInit): Promise<any> {
   const response = await fetch(url, {
@@ -15,11 +15,13 @@ async function jsonFetch(url: string, init?: RequestInit): Promise<any> {
 export async function createProject(options: {
   name: string;
   resolution: number;
+  sampleKind?: string;
   file?: File;
 }): Promise<Project> {
   const form = new FormData();
   form.set("name", options.name);
   form.set("resolution", String(options.resolution));
+  if (options.sampleKind) form.set("sample_kind", options.sampleKind);
   if (options.file) form.set("file", options.file);
   const response = await fetch("/api/projects", { method: "POST", body: form });
   if (!response.ok) throw new Error((await response.json()).detail);
@@ -37,6 +39,8 @@ export const validateProject = (id: number, state: MapState): Promise<Validation
     method: "POST",
     body: JSON.stringify({ state }),
   });
+export const listChecks = (id: number): Promise<CheckRecord[]> =>
+  jsonFetch(`/api/projects/${id}/checks`);
 export const listVersions = (id: number): Promise<Version[]> =>
   jsonFetch(`/api/projects/${id}/versions`);
 export const saveVersion = (id: number, name: string, state: MapState) =>

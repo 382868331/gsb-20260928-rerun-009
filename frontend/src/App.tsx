@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   createProject,
   getProject,
+  listChecks,
   listVersions,
   restoreVersion,
   saveProject,
@@ -24,6 +25,7 @@ export default function App() {
   const [name, setName] = useState("门禁通道工程");
   const [file, setFile] = useState<File | null>(null);
   const [versions, setVersions] = useState<Version[]>([]);
+  const [checks, setChecks] = useState<import("./types").CheckRecord[]>([]);
   const [versionName, setVersionName] = useState("");
   const [result, setResult] = useState<ValidationResult | null>(null);
   const [message, setMessage] = useState("");
@@ -41,6 +43,7 @@ export default function App() {
       setStateDirect(loaded.state);
       setResolution(loaded.resolution);
       listVersions(loaded.id).then(setVersions);
+      listChecks(loaded.id).then(setChecks);
     }).catch((error) => setMessage(error.message));
   }, [projectId]);
 
@@ -83,12 +86,13 @@ export default function App() {
     setResult(null);
   }
 
-  async function importProject(sample = false) {
+  async function importProject(sample = false, sampleKind = "doors") {
     setBusy(true);
     try {
       const created = await createProject({
         name,
         resolution,
+        sampleKind: sample ? sampleKind : undefined,
         file: sample ? undefined : file ?? undefined,
       });
       window.history.replaceState(null, "", `?project=${created.id}`);
@@ -97,6 +101,7 @@ export default function App() {
       setHistory({ past: [], future: [] });
       setResult(null);
       setVersions(await listVersions(created.id));
+      setChecks(await listChecks(created.id));
       setMessage("原图已单独保存，后续修订不会覆盖原图。");
     } catch (error) {
       setMessage((error as Error).message);
@@ -117,8 +122,10 @@ export default function App() {
     setBusy(true);
     try {
       await persist();
-      setResult(await validateProject(project.id, state));
-      setMessage("验证基于服务器保存的栅格和当前米制参数，不受页面缩放影响。");
+      const validation = await validateProject(project.id, state);
+      setResult(validation);
+      setChecks(await listChecks(project.id));
+      setMessage("验证在连续转向中检查整机扫掠外廓；结论独立存档，页面缩放不参与米制计算。");
     } catch (error) {
       setMessage((error as Error).message);
     } finally {
@@ -175,7 +182,8 @@ export default function App() {
           <label>灰度栅格图（深色=障碍）<input type="file" accept="image/png,image/jpeg" onChange={(e) => setFile(e.target.files?.[0] ?? null)} /></label>
           <div className="actions">
             <button disabled={busy || !file} onClick={() => importProject(false)}>导入地图</button>
-            <button disabled={busy} onClick={() => importProject(true)}>使用宽窄门示例</button>
+            <button disabled={busy} onClick={() => importProject(true, "doors")}>使用宽窄门示例</button>
+            <button disabled={busy} onClick={() => importProject(true, "turn")}>使用连续转向示例</button>
           </div>
           {message && <p className="message">{message}</p>}
         </section>
@@ -191,7 +199,9 @@ export default function App() {
               <h2>机器人外廓</h2>
               <label>宽（米）<input type="number" step="0.05" min="0.01" value={state.robot_width} onChange={(e) => setState({ ...state, robot_width: Number(e.target.value) })} /></label>
               <label>长（米）<input type="number" step="0.05" min="0.01" value={state.robot_length} onChange={(e) => setState({ ...state, robot_length: Number(e.target.value) })} /></label>
-              <p className="hint">按完整矩形外廓膨胀障碍；允许水平或竖直穿门，不把机器人降成中心点。</p>
+              <label>起点朝向（度）<input type="number" step="5" value={state.start_orientation} onChange={(e) => setState({ ...state, start_orientation: Number(e.target.value) })} /></label>
+              <label>终点朝向（度）<input type="number" step="5" value={state.end_orientation} onChange={(e) => setState({ ...state, end_orientation: Number(e.target.value) })} /></label>
+              <p className="hint">检查起点到终点之间 5° 分段的整机扫掠外廓；180° 可用于反向通过对照。</p>
             </section>
             <section>
               <h2>修订</h2>
@@ -234,6 +244,18 @@ export default function App() {
                   <small>算法版本：{result.algorithm}</small>
                 </div>
               )}
+              <h3>历史检查</h3>
+              <ul className="versions">
+                {checks.map((check) => (
+                  <li key={check.id}>
+                    <span>
+                      {check.passable ? "通过" : "受阻"}
+                      <small>{new Date(check.created_at).toLocaleString()} · {check.algorithm}</small>
+                    </span>
+                    <button onClick={() => setResult(check.result)}>查看</button>
+                  </li>
+                ))}
+              </ul>
             </section>
           </aside>
           <div className="canvas-wrap">

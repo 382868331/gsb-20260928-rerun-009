@@ -165,6 +165,9 @@ async def validate_project(project_id: int, payload: PassageRequestModel) -> dic
     state = payload.state.model_dump()
     if state["start"] is None or state["end"] is None:
         raise HTTPException(status_code=400, detail="start and end are required")
+    for checkpoint in state["checkpoints"]:
+        if checkpoint["window_end"] < checkpoint["window_start"]:
+            raise HTTPException(status_code=400, detail="checkpoint window end precedes start")
     try:
         result = validate_passage(
             grid,
@@ -175,7 +178,34 @@ async def validate_project(project_id: int, payload: PassageRequestModel) -> dic
             state["origin"],
             state["start"],
             state["end"],
+            start_orientation=state["start_orientation"],
+            end_orientation=state["end_orientation"],
+            checkpoints=state["checkpoints"],
+            waiting_zones=state["waiting_zones"],
+            linear_speed=state["linear_speed"],
+            angular_speed=state["angular_speed"],
+            start_time=state["start_time"],
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result["map_version"] = row["updated_at"]
+    result["state_snapshot"] = state
+    store.save_plan(
+        project_id,
+        {
+            "status": result.get("status"),
+            "schedule": result.get("schedule", []),
+            "plans": result.get("plans", []),
+            "algorithm": result.get("algorithm"),
+            "map_updated_at": row["updated_at"],
+        },
+        state,
+    )
     return result
+
+
+@app.get("/api/projects/{project_id}/plans")
+async def list_plans(project_id: int) -> list[dict[str, Any]]:
+    if store.get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return [dict(row) for row in store.list_plans(project_id)]

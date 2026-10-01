@@ -41,6 +41,14 @@ class Store:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES projects(id)
                 );
+                CREATE TABLE IF NOT EXISTS plans (
+                    id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    result TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(id)
+                );
                 """
             )
 
@@ -134,6 +142,30 @@ class Store:
     def get_version(self, version_id: int) -> sqlite3.Row | None:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM versions WHERE id = ?", (version_id,)).fetchone()
+
+    def save_plan(self, project_id: int, result: dict[str, Any], state: dict[str, Any]) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO plans (project_id, result, state, created_at) VALUES (?, ?, ?, ?)",
+                (project_id, json.dumps(result), json.dumps(state), utc_now()),
+            )
+            return int(cursor.lastrowid)
+
+    def list_plans(self, project_id: int) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT id, result, state, created_at FROM plans WHERE project_id = ? ORDER BY id DESC LIMIT 20",
+                (project_id,),
+            ).fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "created_at": row["created_at"],
+                    "result": json.loads(row["result"]),
+                    "state": json.loads(row["state"]),
+                }
+                for row in rows
+            ]
 
     def restore_version(self, version_id: int) -> dict[str, Any] | None:
         version = self.get_version(version_id)

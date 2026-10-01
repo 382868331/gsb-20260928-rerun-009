@@ -36,3 +36,32 @@ h2 { font-size: 16px; margin: 0 0 8px; }
 .pass { background: #dcfce7; }
 .fail { background: #fee2e2; }
 .pass p, .fail p { margin: 6px 0; font-size: 13px; }
+
+.checkpoint-card {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 6px;
+  margin-bottom: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.schedule {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+
+.schedule th, .schedule td {
+  border: 1px solid #cbd5e1;
+  padding: 2px 6px;
+  text-align: left;
+}
+
+.comparison {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}

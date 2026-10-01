@@ -2,14 +2,26 @@ import { useEffect, useMemo, useState } from "react";
 import {
   createProject,
   getProject,
+  listPlans,
   listVersions,
+  rejudgePlan,
   restoreVersion,
   saveProject,
   saveVersion,
+  timedPlan,
   validateProject,
 } from "./api";
 import { MapCanvas } from "./MapCanvas";
-import type { MapState, Project, ValidationResult, Version } from "./types";
+import type {
+  Checkpoint,
+  MapState,
+  PlanSummary,
+  Project,
+  RejudgeResult,
+  TimedPlanResult,
+  ValidationResult,
+  Version,
+} from "./types";
 
 const STORAGE_KEY = "robot-map-editor-draft";
 
@@ -26,6 +38,9 @@ export default function App() {
   const [versions, setVersions] = useState<Version[]>([]);
   const [versionName, setVersionName] = useState("");
   const [result, setResult] = useState<ValidationResult | null>(null);
+  const [timed, setTimed] = useState<TimedPlanResult | null>(null);
+  const [plans, setPlans] = useState<PlanSummary[]>([]);
+  const [comparison, setComparison] = useState<RejudgeResult | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -41,6 +56,7 @@ export default function App() {
       setStateDirect(loaded.state);
       setResolution(loaded.resolution);
       listVersions(loaded.id).then(setVersions);
+      listPlans(loaded.id).then(setPlans);
     }).catch((error) => setMessage(error.message));
   }, [projectId]);
 
@@ -59,6 +75,8 @@ export default function App() {
     }
     setStateDirect(next);
     setResult(null);
+    setTimed(null);
+    setComparison(null);
   }
 
   function undo() {
@@ -70,6 +88,8 @@ export default function App() {
     });
     setStateDirect(previous);
     setResult(null);
+    setTimed(null);
+    setComparison(null);
   }
 
   function redo() {
@@ -81,6 +101,8 @@ export default function App() {
     });
     setStateDirect(next);
     setResult(null);
+    setTimed(null);
+    setComparison(null);
   }
 
   async function importProject(sample = false) {
@@ -96,7 +118,10 @@ export default function App() {
       setStateDirect(created.state);
       setHistory({ past: [], future: [] });
       setResult(null);
+      setTimed(null);
+      setComparison(null);
       setVersions(await listVersions(created.id));
+      setPlans(await listPlans(created.id));
       setMessage("原图已单独保存，后续修订不会覆盖原图。");
     } catch (error) {
       setMessage((error as Error).message);
@@ -126,6 +151,38 @@ export default function App() {
     }
   }
 
+  async function handleTimedPlan() {
+    if (!project || !state) return;
+    setBusy(true);
+    try {
+      await persist();
+      const planned = await timedPlan(project.id, state, `方案 ${plans.length + 1}`);
+      setTimed(planned);
+      setComparison(null);
+      setPlans(await listPlans(project.id));
+      setMessage("时间安排与地图版本已随方案保存。");
+    } catch (error) {
+      setMessage((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRejudge(planId: number) {
+    if (!project || !state) return;
+    setBusy(true);
+    try {
+      const compared = await rejudgePlan(planId, state.checkpoints);
+      setComparison(compared);
+      setPlans(await listPlans(project.id));
+      setMessage("已按修改后的时间窗口重判：保留几何路线 vs 调整等待位置。");
+    } catch (error) {
+      setMessage((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function createSavedVersion() {
     if (!project || !state) return;
     await saveVersion(project.id, versionName || `版本 ${versions.length + 1}`, state);
@@ -139,12 +196,32 @@ export default function App() {
     const restored = await restoreVersion(version.id);
     setStateDirect(restored.state);
     setResult(null);
+    setTimed(null);
+    setComparison(null);
     setMessage(`已恢复：${version.name}`);
   }
 
   function removeZone(id: string) {
     if (!state) return;
     setState({ ...state, forbidden_zones: state.forbidden_zones.filter((zone) => zone.id !== id) });
+  }
+
+  function removeNoWaitZone(id: string) {
+    if (!state) return;
+    setState({ ...state, no_wait_zones: state.no_wait_zones.filter((zone) => zone.id !== id) });
+  }
+
+  function updateCheckpoint(id: string, patch: Partial<Checkpoint>) {
+    if (!state) return;
+    setState({
+      ...state,
+      checkpoints: state.checkpoints.map((cp) => (cp.id === id ? { ...cp, ...patch } : cp)),
+    });
+  }
+
+  function removeCheckpoint(id: string) {
+    if (!state) return;
+    setState({ ...state, checkpoints: state.checkpoints.filter((cp) => cp.id !== id) });
   }
 
   return (
@@ -194,6 +271,39 @@ export default function App() {
               <p className="hint">按完整矩形外廓膨胀障碍；允许水平或竖直穿门，不把机器人降成中心点。</p>
             </section>
             <section>
+              <h2>姿态与速度</h2>
+              <label>起点朝向（度）<input type="number" step="15" value={state.start_orientation} onChange={(e) => setState({ ...state, start_orientation: Number(e.target.value) })} /></label>
+              <label>终点朝向（度）<input type="number" step="15" value={state.end_orientation} onChange={(e) => setState({ ...state, end_orientation: Number(e.target.value) })} /></label>
+              <label>线速度（米/秒）<input type="number" step="0.1" min="0.05" value={state.linear_speed} onChange={(e) => setState({ ...state, linear_speed: Number(e.target.value) })} /></label>
+              <label>角速度（度/秒）<input type="number" step="15" min="15" value={state.angular_speed} onChange={(e) => setState({ ...state, angular_speed: Number(e.target.value) })} /></label>
+              <p className="hint">同位转向会校验长方形扫掠；位置到达不等于姿态到达。</p>
+            </section>
+            <section>
+              <h2>检查点（按顺序）</h2>
+              {state.checkpoints.length === 0 && <p className="hint">在画布上选择“检查点”后点击添加。</p>}
+              {state.checkpoints.map((cp, index) => (
+                <div key={cp.id} className="checkpoint-card">
+                  <strong>#{index + 1} {cp.name}</strong>
+                  <label>名称<input value={cp.name} onChange={(e) => updateCheckpoint(cp.id, { name: e.target.value })} /></label>
+                  <label>朝向（度）<input type="number" step="15" value={cp.orientation} onChange={(e) => updateCheckpoint(cp.id, { orientation: Number(e.target.value) })} /></label>
+                  <label>最早（秒）<input type="number" step="1" min="0" value={cp.earliest} onChange={(e) => updateCheckpoint(cp.id, { earliest: Number(e.target.value) })} /></label>
+                  <label>最晚（秒）<input type="number" step="1" min="0" value={cp.latest} onChange={(e) => updateCheckpoint(cp.id, { latest: Number(e.target.value) })} /></label>
+                  <small>({cp.x.toFixed(2)}, {cp.y.toFixed(2)})</small>
+                  <button onClick={() => removeCheckpoint(cp.id)}>删除</button>
+                </div>
+              ))}
+            </section>
+            <section>
+              <h2>禁止停留通道</h2>
+              {state.no_wait_zones.length === 0 && <p className="hint">用“禁止停留通道”工具在画布上框选。</p>}
+              {state.no_wait_zones.map((zone) => (
+                <div key={zone.id} className="zone-row">
+                  <span>{zone.width.toFixed(2)} × {zone.height.toFixed(2)} m</span>
+                  <button onClick={() => removeNoWaitZone(zone.id)}>删除</button>
+                </div>
+              ))}
+            </section>
+            <section>
               <h2>修订</h2>
               <div className="actions">
                 <button onClick={undo} disabled={history.past.length === 0}>撤回</button>
@@ -235,9 +345,61 @@ export default function App() {
                 </div>
               )}
             </section>
+            <section>
+              <h2>带时间检查点验证</h2>
+              <button disabled={busy} onClick={handleTimedPlan}>按时间窗口规划</button>
+              {timed && (
+                <div className={timed.status === "ok" ? "pass" : "fail"}>
+                  <strong>{timed.status_label}</strong>
+                  <p>{timed.reason}</p>
+                  {timed.total_time !== undefined && <p>总耗时：{timed.total_time.toFixed(2)} 秒</p>}
+                  {timed.schedule && timed.schedule.length > 0 && (
+                    <table className="schedule">
+                      <thead>
+                        <tr><th>节点</th><th>到达</th><th>等待</th><th>窗口</th></tr>
+                      </thead>
+                      <tbody>
+                        {timed.schedule.map((entry, index) => (
+                          <tr key={index}>
+                            <td>{entry.name}</td>
+                            <td>{entry.arrival.toFixed(2)}s</td>
+                            <td>{entry.wait ? `${entry.wait.toFixed(2)}s` : "-"}</td>
+                            <td>{entry.earliest !== undefined ? `[${entry.earliest}, ${entry.latest}]s` : "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                  <small>算法版本：{timed.algorithm}</small>
+                </div>
+              )}
+            </section>
+            <section>
+              <h2>方案</h2>
+              <ul className="versions">
+                {plans.map((plan) => (
+                  <li key={plan.id}>
+                    <span>{plan.name}<small>{plan.status} · {new Date(plan.created_at).toLocaleString()}</small></span>
+                    <button disabled={busy} onClick={() => handleRejudge(plan.id)}>重判对比</button>
+                  </li>
+                ))}
+              </ul>
+              {comparison && (
+                <div className="comparison">
+                  <div className={comparison.kept.status === "ok" ? "pass" : "fail"}>
+                    <strong>保留几何路线：{comparison.kept.status_label}</strong>
+                    <p>{comparison.kept.reason}</p>
+                  </div>
+                  <div className={comparison.adjusted.status === "ok" ? "pass" : "fail"}>
+                    <strong>调整等待位置：{comparison.adjusted.status_label}</strong>
+                    <p>{comparison.adjusted.reason}</p>
+                  </div>
+                </div>
+              )}
+            </section>
           </aside>
           <div className="canvas-wrap">
-            <MapCanvas project={project} state={state} scale={scale} result={result} onChange={setState} />
+            <MapCanvas project={project} state={state} scale={scale} result={result} timed={timed} onChange={setState} />
             <p className="message">{message}</p>
           </div>
         </div>

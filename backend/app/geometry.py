@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 
 
-ALGORITHM_VERSION = "continuous-orientation-footprint-bfs-v2"
+ALGORITHM_VERSION = "continuous-orientation-footprint-bfs-v3"
 
 # 10 deg per configuration layer. Each layer conservatively covers the whole
 # angular interval around its center, so changing between adjacent layers can
@@ -48,7 +48,9 @@ def _footprint_mask(
     hit = np.zeros_like(local_x, dtype=bool)
 
     # Inflation between sampled headings makes the angular sweep conservative
-    # instead of trusting a finite set of displayed poses.
+    # instead of trusting a finite set of displayed poses. A zero-width
+    # interval (theta_start == theta_end) yields the exact single-heading
+    # footprint with no angular inflation.
     sample_step = (theta_end - theta_start) / max(1, ANGLE_SUBDIVISIONS - 1)
     angular_slack = corner_radius * math.sin(sample_step / 2.0)
     half_length = robot_length / 2.0 + angular_slack
@@ -60,19 +62,29 @@ def _footprint_mask(
         cos_theta = math.cos(theta)
         along = local_x * sin_theta + local_y * cos_theta
         across = local_x * cos_theta - local_y * sin_theta
-        # Cell-center test plus half a cell covers every overlapping cell.
-        cell_slack = resolution * 0.5
-        hit |= (np.abs(along) <= half_length + cell_slack) & (
-            np.abs(across) <= half_width + cell_slack
+        # Cell-center containment test: a cell belongs to the footprint when
+        # the rectangle covers the cell center. This keeps doors that exactly
+        # fit the robot body passable instead of demanding phantom clearance.
+        cell_slack = 0.0
+        hit |= (np.abs(along) < half_length + cell_slack) & (
+            np.abs(across) < half_width + cell_slack
         )
 
-    # Square dilation in map cells covers one-cell translation sweeps, so the
-    # BFS path cannot clip a corner between two stored centers.
-    hit[1:, :] |= hit[:-1, :]
-    hit[:-1, :] |= hit[1:, :]
-    hit[:, 1:] |= hit[:, :-1]
-    hit[:, :-1] |= hit[:, 1:]
     return hit
+
+
+def _dilate_mask(mask: np.ndarray, axis: int) -> np.ndarray:
+    """One-cell dilation along a single axis, covering a one-cell translation
+    sweep in that direction without inflating perpendicular clearance."""
+
+    dilated = mask.copy()
+    if axis == 0:
+        dilated[1:, :] |= mask[:-1, :]
+        dilated[:-1, :] |= mask[1:, :]
+    else:
+        dilated[:, 1:] |= mask[:, :-1]
+        dilated[:, :-1] |= mask[:, 1:]
+    return dilated
 
 
 def _free_centers_for_mask(occupancy: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -103,20 +115,41 @@ def build_orientation_layers(
     robot_width: float,
     robot_length: float,
     resolution: float,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     angle_step = 2.0 * math.pi / ORIENTATION_STEPS
-    layers = np.zeros((ORIENTATION_STEPS, *occupancy.shape), dtype=bool)
+    pose = np.zeros((ORIENTATION_STEPS, *occupancy.shape), dtype=bool)
+    pose_x = np.zeros_like(pose)
+    pose_y = np.zeros_like(pose)
+    sweep = np.zeros_like(pose)
     orientations = np.arange(ORIENTATION_STEPS, dtype=float) * angle_step
     for layer, center_angle in enumerate(orientations):
-        mask = _footprint_mask(
+        # Exact footprint at the layer-center heading: translations are
+        # executed at a fixed heading, so no angular inflation is needed and
+        # an exactly fitting door stays passable.
+        center_mask = _footprint_mask(
+            float(center_angle),
+            float(center_angle),
+            robot_width,
+            robot_length,
+            resolution,
+        )
+        pose[layer] = _free_centers_for_mask(occupancy, center_mask)
+        # Translation sweeps are checked per movement direction: sliding one
+        # cell horizontally only sweeps the footprint along x, so the
+        # perpendicular clearance of the base mask stays exact.
+        pose_x[layer] = _free_centers_for_mask(occupancy, _dilate_mask(center_mask, axis=1))
+        pose_y[layer] = _free_centers_for_mask(occupancy, _dilate_mask(center_mask, axis=0))
+        # Conservative whole-interval footprint used to validate in-place
+        # rotation between adjacent layers.
+        sweep_mask = _footprint_mask(
             float(center_angle - angle_step / 2.0),
             float(center_angle + angle_step / 2.0),
             robot_width,
             robot_length,
             resolution,
         )
-        layers[layer] = _free_centers_for_mask(occupancy, mask)
-    return layers, orientations
+        sweep[layer] = _free_centers_for_mask(occupancy, sweep_mask)
+    return pose, pose_x, pose_y, sweep, orientations
 
 
 def normalize_orientation(orientation: float) -> float:
@@ -129,6 +162,40 @@ def normalize_orientation(orientation: float) -> float:
 def nearest_orientation_layer(orientation: float) -> int:
     layer = round(normalize_orientation(orientation) / (2.0 * math.pi) * ORIENTATION_STEPS)
     return int(layer) % ORIENTATION_STEPS
+
+
+def configuration_neighbors(
+    layer: int,
+    row: int,
+    col: int,
+    pose: np.ndarray,
+    free_x: np.ndarray,
+    free_y: np.ndarray,
+    sweep: np.ndarray,
+) -> list[tuple[int, int, int]]:
+    """Collision-checked adjacent configurations.
+
+    Horizontal slides require the x-swept layer, vertical slides the y-swept
+    layer, and in-place rotation steps require the conservative sweep mask on
+    both layers so the whole rotated range is collision-free.
+    """
+
+    rows, cols = pose.shape[1], pose.shape[2]
+    moves = []
+    if row > 0 and free_y[layer, row, col]:
+        moves.append((layer, row - 1, col))
+    if row + 1 < rows and free_y[layer, row, col]:
+        moves.append((layer, row + 1, col))
+    if col > 0 and free_x[layer, row, col]:
+        moves.append((layer, row, col - 1))
+    if col + 1 < cols and free_x[layer, row, col]:
+        moves.append((layer, row, col + 1))
+    if sweep[layer, row, col]:
+        for delta in (-1, 1):
+            next_layer = (layer + delta) % ORIENTATION_STEPS
+            if sweep[next_layer, row, col]:
+                moves.append((next_layer, row, col))
+    return moves
 
 
 def build_occupancy(
@@ -186,25 +253,35 @@ def validate_passage(
     if not (0 <= end_row < rows and 0 <= end_col < cols):
         raise ValueError("end is outside the map")
 
-    free, orientations = build_orientation_layers(occupancy, robot_width, robot_length, resolution)
+    pose, free_x, free_y, sweep, orientations = build_orientation_layers(
+        occupancy, robot_width, robot_length, resolution
+    )
     angular_resolution = 2.0 * math.pi / ORIENTATION_STEPS
     start_layer = nearest_orientation_layer(start_orientation)
     end_layer = nearest_orientation_layer(
         start_orientation if end_orientation is None else end_orientation
     )
 
-    if not free[start_layer, start_row, start_col]:
+    if not pose[start_layer, start_row, start_col]:
         return {
             "passable": False,
-            "reason": "start cannot contain the complete rotating robot footprint",
+            "reason": "start pose collides: the complete rectangle footprint does not fit",
             "algorithm": ALGORITHM_VERSION,
             "path": [],
             "angular_resolution": angular_resolution,
         }
-    if not free[end_layer, end_row, end_col]:
+    if not pose[end_layer, end_row, end_col]:
+        same_spot = start_row == end_row and start_col == end_col
+        if same_spot and start_layer != end_layer:
+            reason = (
+                "目标位置与起点相同但朝向不同：目标朝向下长方形外廓与障碍冲突，"
+                "此处无法安全转向到该姿态"
+            )
+        else:
+            reason = "end pose collides: the complete rectangle footprint does not fit"
         return {
             "passable": False,
-            "reason": "end cannot contain the complete rotating robot footprint",
+            "reason": reason,
             "algorithm": ALGORITHM_VERSION,
             "path": [],
             "angular_resolution": angular_resolution,
@@ -222,29 +299,35 @@ def validate_passage(
     while head < len(queue):
         layer, row, col = queue[head]
         head += 1
-        if row == end_row and col == end_col:
+        if layer == end_layer and row == end_row and col == end_col:
             target = (layer, row, col)
             break
-        for next_layer, next_row, next_col in (
-            (layer, row - 1, col),
-            (layer, row + 1, col),
-            (layer, row, col - 1),
-            (layer, row, col + 1),
-            ((layer - 1) % ORIENTATION_STEPS, row, col),
-            ((layer + 1) % ORIENTATION_STEPS, row, col),
+        for next_layer, next_row, next_col in configuration_neighbors(
+            layer, row, col, pose, free_x, free_y, sweep
         ):
             if not (0 <= next_row < rows and 0 <= next_col < cols):
                 continue
-            if not free[next_layer, next_row, next_col] or dist[next_layer, next_row, next_col] != -1:
+            if dist[next_layer, next_row, next_col] != -1:
                 continue
             dist[next_layer, next_row, next_col] = dist[layer, row, col] + 1
             previous[(next_layer, next_row, next_col)] = (layer, row, col)
             queue.append((next_layer, next_row, next_col))
 
     if target is None:
+        same_spot = start_row == end_row and start_col == end_col
+        if same_spot and start_layer != end_layer:
+            reason = (
+                "目标位置与起点相同但朝向不同：在此处原地转向时，长方形机器人"
+                "的旋转扫掠与障碍冲突，无法安全完成转向"
+            )
+        else:
+            reason = (
+                "no collision-free continuous-turn trajectory exists for the "
+                "complete rectangle footprint"
+            )
         return {
             "passable": False,
-            "reason": "no collision-free continuous-turn trajectory exists for the complete rectangle footprint",
+            "reason": reason,
             "algorithm": ALGORITHM_VERSION,
             "path": [],
             "angular_resolution": angular_resolution,

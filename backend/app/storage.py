@@ -41,6 +41,16 @@ class Store:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES projects(id)
                 );
+                CREATE TABLE IF NOT EXISTS plans (
+                    id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(id)
+                );
                 """
             )
 
@@ -146,3 +156,33 @@ class Store:
                 (version["state"], utc_now(), version["project_id"]),
             )
         return state
+
+    def create_plan(
+        self,
+        project_id: int,
+        name: str,
+        kind: str,
+        status: str,
+        payload: dict[str, Any],
+    ) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO plans (project_id, name, kind, status, payload, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (project_id, name, kind, status, json.dumps(payload), utc_now()),
+            )
+            return int(cursor.lastrowid)
+
+    def list_plans(self, project_id: int) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return list(
+                conn.execute(
+                    "SELECT id, name, kind, status, created_at FROM plans"
+                    " WHERE project_id = ? ORDER BY id DESC",
+                    (project_id,),
+                )
+            )
+
+    def get_plan(self, plan_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()

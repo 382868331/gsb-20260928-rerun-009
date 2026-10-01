@@ -1,4 +1,13 @@
-import type { MapState, Project, ValidationResult, Version } from "./types";
+import type {
+  Checkpoint,
+  MapState,
+  PlanSummary,
+  Project,
+  RejudgeResult,
+  TimedPlanResult,
+  ValidationResult,
+  Version,
+} from "./types";
 
 async function jsonFetch(url: string, init?: RequestInit): Promise<any> {
   const response = await fetch(url, {
@@ -47,3 +56,16 @@ export const saveVersion = (id: number, name: string, state: MapState) =>
 export async function restoreVersion(versionId: number): Promise<{ state: MapState }> {
   return jsonFetch(`/api/versions/${versionId}/restore`, { method: "POST" });
 }
+
+export const timedPlan = (id: number, state: MapState, name: string): Promise<TimedPlanResult> =>
+  jsonFetch(`/api/projects/${id}/timed-plan`, {
+    method: "POST",
+    body: JSON.stringify({ state, name }),
+  });
+export const listPlans = (id: number): Promise<PlanSummary[]> =>
+  jsonFetch(`/api/projects/${id}/plans`);
+export const rejudgePlan = (planId: number, checkpoints: Checkpoint[]): Promise<RejudgeResult> =>
+  jsonFetch(`/api/plans/${planId}/rejudge`, {
+    method: "POST",
+    body: JSON.stringify({ checkpoints }),
+  });

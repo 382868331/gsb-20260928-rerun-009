@@ -70,3 +70,55 @@ async def test_versions_preserve_original_and_restore_state(client):
     assert restored["state"]["origin"] == {"x": -2.5, "y": 1.0}
     original = await client.get(f"/api/projects/{project['id']}/original")
     assert original.headers["content-type"] == "image/png"
+
+
+@pytest.mark.anyio
+async def test_timed_plan_and_rejudge_flow(client):
+    project = (await client.post("/api/projects", data={"name": "timed"})).json()
+    state = project["state"]
+    state["robot_width"] = 0.2
+    state["robot_length"] = 0.3
+    state["start"] = {"x": 0.2, "y": 0.2}
+    state["end"] = {"x": 0.2, "y": 2.0}
+    state["checkpoints"] = [
+        {
+            "id": "cp1",
+            "name": "窄门",
+            "x": 0.2,
+            "y": 0.8,
+            "orientation": 0.0,
+            "earliest": 0.0,
+            "latest": 60.0,
+        }
+    ]
+    planned = (await client.post(
+        f"/api/projects/{project['id']}/timed-plan",
+        json={"state": state, "name": "初始方案"},
+    )).json()
+    assert planned["status"] == "ok"
+    assert planned["schedule"][0]["name"] == "窄门"
+    plan_id = planned["plan_id"]
+
+    plans = (await client.get(f"/api/projects/{project['id']}/plans")).json()
+    assert plans[0]["status"] == "ok"
+
+    loaded = (await client.get(f"/api/plans/{plan_id}")).json()
+    assert loaded["map_revision"]
+    assert loaded["result"]["schedule"]
+
+    new_windows = [dict(state["checkpoints"][0], earliest=0.0, latest=0.01)]
+    rejudged = (await client.post(
+        f"/api/plans/{plan_id}/rejudge", json={"checkpoints": new_windows}
+    )).json()
+    assert rejudged["kept"]["status"] == "window_missed"
+    assert rejudged["adjusted"]["status"] == "window_missed"
+
+    relaxed = [dict(state["checkpoints"][0], earliest=5.0, latest=60.0)]
+    rejudged_ok = (await client.post(
+        f"/api/plans/{plan_id}/rejudge", json={"checkpoints": relaxed}
+    )).json()
+    assert rejudged_ok["kept"]["status"] == "ok"
+    assert rejudged_ok["kept"]["schedule"][0]["wait"] > 0
+
+    plans_after = (await client.get(f"/api/projects/{project['id']}/plans")).json()
+    assert len(plans_after) == 5

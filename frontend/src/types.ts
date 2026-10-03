@@ -49,10 +49,48 @@ export type Project = {
   width: number;
   height: number;
   state: MapState;
+  state_defaults_filled?: string[];
   grid: boolean[][];
   original_url: string;
   updated_at: string;
 };
+
+const STATE_DEFAULTS: MapState = {
+  origin: { x: 0, y: 0 },
+  forbidden_zones: [],
+  timed_zones: [],
+  waiting_zones: [],
+  checkpoints: [],
+  start: null,
+  end: null,
+  robot_width: 0.5,
+  robot_length: 0.8,
+  start_orientation: 0,
+  end_orientation: null,
+  linear_speed: 0.5,
+  angular_speed: 0.5,
+  start_time: 0,
+};
+
+export function normalizeState(raw: Partial<MapState> | null | undefined): {
+  state: MapState;
+  filled: string[];
+} {
+  const source = raw ?? {};
+  const state = { ...STATE_DEFAULTS, ...source } as MapState;
+  const filled: string[] = [];
+  (Object.keys(STATE_DEFAULTS) as Array<keyof MapState>).forEach((key) => {
+    if (source[key] === undefined || source[key] === null) {
+      const fallback = STATE_DEFAULTS[key];
+      const isList = Array.isArray(fallback);
+      if (source[key] === undefined || isList) {
+        (state as Record<string, unknown>)[key] = isList ? [] : fallback;
+        filled.push(key);
+      }
+    }
+  });
+  return { state, filled };
+}
 
 export type Version = {
   id: number;

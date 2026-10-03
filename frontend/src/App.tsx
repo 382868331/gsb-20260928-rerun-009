@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   createProject,
   getProject,
+  listPlans,
   listVersions,
   replayPlan,
   restoreVersion,
@@ -10,6 +11,7 @@ import {
   validateProject,
 } from "./api";
 import { MapCanvas } from "./MapCanvas";
+import { normalizeState } from "./types";
 import type { MapState, Project, ValidationResult, Version } from "./types";
 
 const STORAGE_KEY = "robot-map-editor-draft";
@@ -59,10 +61,47 @@ export default function App() {
   useEffect(() => {
     if (!projectId) return;
     getProject(Number(projectId)).then((loaded) => {
+      const normalized = normalizeState(loaded.state);
+      const filled = Array.from(
+        new Set([...(loaded.state_defaults_filled ?? []), ...normalized.filled])
+      );
       setProject(loaded);
-      setStateDirect(loaded.state);
+      setStateDirect(normalized.state);
       setResolution(loaded.resolution);
       listVersions(loaded.id).then(setVersions);
+      const notices: string[] = [];
+      if (filled.length > 0) {
+        notices.push(
+          "旧工程缺少新增字段（" + filled.join("、") + "），已按默认空配置处理；尚未验证，请重新执行检查。"
+        );
+      }
+      try {
+        const draftRaw = localStorage.getItem(STORAGE_KEY);
+        if (draftRaw) {
+          const draft = JSON.parse(draftRaw);
+          if (
+            draft.projectId === loaded.id &&
+            new Date(draft.savedAt).getTime() > new Date(loaded.updated_at).getTime() &&
+            JSON.stringify(draft.state) !== JSON.stringify(normalized.state)
+          ) {
+            setStateDirect(normalizeState(draft.state).state);
+            notices.push("已找回刷新前未保存的编辑（" + new Date(draft.savedAt).toLocaleString() + "）。");
+          }
+        }
+      } catch {
+        // 忽略损坏的草稿
+      }
+      listPlans(loaded.id)
+        .then((plans) => {
+          if (plans.length > 0 && typeof plans[0].result?.passable === "boolean") {
+            setResult(plans[0].result);
+            notices.push("已找回最近保存的核对报告（" + (plans[0].result.status ?? "未知") + "）。");
+          }
+          if (notices.length > 0) setMessage(notices.join(" "));
+        })
+        .catch(() => {
+          if (notices.length > 0) setMessage(notices.join(" "));
+        });
     }).catch((error) => setMessage(error.message));
   }, [projectId]);
 
@@ -115,7 +154,7 @@ export default function App() {
       });
       window.history.replaceState(null, "", `?project=${created.id}`);
       setProject(created);
-      setStateDirect(created.state);
+      setStateDirect(normalizeState(created.state).state);
       setHistory({ past: [], future: [] });
       setResult(null);
       setVersions(await listVersions(created.id));
@@ -189,9 +228,17 @@ export default function App() {
     if (!project || !state) return;
     setHistory((old) => ({ past: [...old.past, state], future: [] }));
     const restored = await restoreVersion(version.id);
-    setStateDirect(restored.state);
+    const normalized = normalizeState(restored.state);
+    const filled = Array.from(
+      new Set([...(restored.state_defaults_filled ?? []), ...normalized.filled])
+    );
+    setStateDirect(normalized.state);
     setResult(null);
-    setMessage(`已恢复：${version.name}`);
+    setMessage(
+      filled.length > 0
+        ? `已恢复：${version.name}。该旧版本缺少新增字段（${filled.join("、")}），已按默认空配置处理，验证状态未继承，请重新检查。`
+        : `已恢复：${version.name}`
+    );
   }
 
   function removeZone(id: string) {
@@ -445,8 +492,8 @@ export default function App() {
                   {result.replay && (
                     <small>
                       重放校验：{result.replay.ok ? "全部通过" : "存在矛盾"}
-                      {result.replay.missing_checkpoints.length > 0
-                        ? "；缺检查点 " + result.replay.missing_checkpoints.join(", ")
+                      {(result.replay.missing_checkpoints ?? []).length > 0
+                        ? "；缺检查点 " + (result.replay.missing_checkpoints ?? []).join(", ")
                         : ""}
                     </small>
                   )}

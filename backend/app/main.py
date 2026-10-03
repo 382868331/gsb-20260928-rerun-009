@@ -26,19 +26,56 @@ app.add_middleware(
 store = Store(DB_PATH)
 
 
+STATE_DEFAULTS: dict[str, Any] = {
+    "origin": {"x": 0.0, "y": 0.0},
+    "forbidden_zones": [],
+    "timed_zones": [],
+    "waiting_zones": [],
+    "checkpoints": [],
+    "start": None,
+    "end": None,
+    "robot_width": 0.5,
+    "robot_length": 0.8,
+    "start_orientation": 0.0,
+    "end_orientation": None,
+    "linear_speed": 0.5,
+    "angular_speed": 0.5,
+    "start_time": 0.0,
+}
+
+
+def normalize_state(state: dict[str, Any]) -> dict[str, Any]:
+    """补齐旧工程缺失的字段，返回 (状态, 补齐的字段名列表)。
+
+    只填充明确的默认值，不会把旧工程标记为已验证。
+    """
+
+    normalized = dict(state)
+    filled: list[str] = []
+    for key, default in STATE_DEFAULTS.items():
+        if key not in normalized or normalized[key] is None and default is not None and key in (
+            "forbidden_zones",
+            "timed_zones",
+            "waiting_zones",
+            "checkpoints",
+        ):
+            normalized[key] = json.loads(json.dumps(default))
+            filled.append(key)
+    return normalized, filled
+
+
 def default_state(map_width: int, map_height: int, resolution: float) -> dict[str, Any]:
-    return {
-        "origin": {"x": 0.0, "y": 0.0},
-        "forbidden_zones": [],
+    state, _ = normalize_state({})
+    state.update({
         "start": {"x": resolution, "y": resolution},
         "end": {"x": resolution, "y": map_height * resolution - resolution},
-        "robot_width": 0.5,
-        "robot_length": 0.8,
-    }
+    })
+    return state
 
 
 def serialize_project(row) -> dict[str, Any]:
     map_data = json.loads(row["map_data"])
+    state, filled = normalize_state(json.loads(row["state"]))
     return {
         "id": row["id"],
         "name": row["name"],
@@ -46,7 +83,8 @@ def serialize_project(row) -> dict[str, Any]:
         "threshold": row["threshold"],
         "width": row["width"],
         "height": row["height"],
-        "state": json.loads(row["state"]),
+        "state": state,
+        "state_defaults_filled": filled,
         "grid": map_data["grid"],
         "original_url": f"/api/projects/{row['id']}/original",
         "created_at": row["created_at"],
@@ -153,7 +191,8 @@ async def restore_version(version_id: int) -> dict[str, Any]:
     state = store.restore_version(version_id)
     if state is None:
         raise HTTPException(status_code=404, detail="version not found")
-    return {"state": state}
+    normalized, filled = normalize_state(state)
+    return {"state": normalized, "state_defaults_filled": filled}
 
 
 @app.post("/api/projects/{project_id}/validate")
@@ -193,18 +232,11 @@ async def validate_project(project_id: int, payload: PassageRequestModel) -> dic
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     result["map_version"] = row["updated_at"]
     result["state_snapshot"] = state
+    saved_result = dict(result)
+    saved_result["map_updated_at"] = row["updated_at"]
     store.save_plan(
         project_id,
-        {
-            "status": result.get("status"),
-            "schedule": result.get("schedule", []),
-            "plans": result.get("plans", []),
-            "segments": result.get("segments", []),
-            "replay": result.get("replay", {}),
-            "status": result.get("status"),
-            "algorithm": result.get("algorithm"),
-            "map_updated_at": row["updated_at"],
-        },
+        saved_result,
         state,
     )
     return result
@@ -218,7 +250,7 @@ async def replay_plan(plan_id: int) -> dict[str, Any]:
     if record is None:
         raise HTTPException(status_code=404, detail="plan not found")
     saved_result = json.loads(record["result"])
-    state = json.loads(record["state"])
+    state, _ = normalize_state(json.loads(record["state"]))
     project_id = record["project_id"]
     row = store.get_project(project_id)
     if row is None:

@@ -1,5 +1,12 @@
 import type { MapState, Point, Project, ValidationResult, Version } from "./types";
 
+export type SavedPlan = {
+  id: number;
+  created_at: string;
+  result: ValidationResult & { map_updated_at?: string };
+  state: MapState;
+};
+
 async function jsonFetch(url: string, init?: RequestInit): Promise<any> {
   const response = await fetch(url, {
     ...init,
@@ -49,6 +56,8 @@ export const validateProject = (
 
 export const replayPlan = (planId: number) =>
   jsonFetch(`/api/plans/${planId}/replay`, { method: "POST" });
+export const listPlans = (id: number): Promise<SavedPlan[]> =>
+  jsonFetch(`/api/projects/${id}/plans`);
 export const listVersions = (id: number): Promise<Version[]> =>
   jsonFetch(`/api/projects/${id}/versions`);
 export const saveVersion = (id: number, name: string, state: MapState) =>
@@ -56,6 +65,8 @@ export const saveVersion = (id: number, name: string, state: MapState) =>
     method: "POST",
     body: JSON.stringify({ name, state }),
   });
-export async function restoreVersion(versionId: number): Promise<{ state: MapState }> {
+export async function restoreVersion(
+  versionId: number
+): Promise<{ state: MapState; state_defaults_filled?: string[] }> {
   return jsonFetch(`/api/versions/${versionId}/restore`, { method: "POST" });
 }

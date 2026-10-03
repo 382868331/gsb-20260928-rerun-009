@@ -14,6 +14,22 @@ class ZoneModel(BaseModel):
     height: float = Field(gt=0)
 
 
+class ClosureZoneModel(BaseModel):
+    """Region forbidden only inside [close_start, close_end).
+
+    Boundary rule: at ``close_start`` the robot must already be fully outside;
+    at ``close_end`` it may enter again. Both instants themselves are safe.
+    """
+
+    id: str
+    x: float
+    y: float
+    width: float = Field(gt=0)
+    height: float = Field(gt=0)
+    close_start: float = Field(ge=0)
+    close_end: float = Field(ge=0)
+
+
 class CheckpointModel(BaseModel):
     id: str
     order: int = Field(ge=0)
@@ -29,6 +45,7 @@ class CheckpointModel(BaseModel):
 class MapStateModel(BaseModel):
     origin: PointModel
     forbidden_zones: list[ZoneModel] = Field(default_factory=list)
+    closure_zones: list[ClosureZoneModel] = Field(default_factory=list)
     waiting_zones: list[ZoneModel] = Field(default_factory=list)
     checkpoints: list[CheckpointModel] = Field(default_factory=list)
     start: PointModel | None = None

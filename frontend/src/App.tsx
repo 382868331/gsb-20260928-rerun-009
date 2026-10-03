@@ -6,12 +6,28 @@ import {
   restoreVersion,
   saveProject,
   saveVersion,
+  rescheduleProject,
   validateProject,
 } from "./api";
 import { MapCanvas } from "./MapCanvas";
 import type { MapState, Project, ValidationResult, Version } from "./types";
 
 const STORAGE_KEY = "robot-map-editor-draft";
+
+const STATE_DEFAULTS = {
+  closure_zones: [],
+  waiting_zones: [],
+  checkpoints: [],
+  start_orientation: 0,
+  end_orientation: null,
+  linear_speed: 0.5,
+  angular_speed: 0.5,
+  start_time: 0,
+};
+
+function normalizeState(loaded: MapState): MapState {
+  return { ...STATE_DEFAULTS, ...loaded };
+}
 
 type EditHistory = { past: MapState[]; future: MapState[] };
 
@@ -38,7 +54,7 @@ export default function App() {
     if (!projectId) return;
     getProject(Number(projectId)).then((loaded) => {
       setProject(loaded);
-      setStateDirect(loaded.state);
+      setStateDirect(normalizeState(loaded.state));
       setResolution(loaded.resolution);
       listVersions(loaded.id).then(setVersions);
     }).catch((error) => setMessage(error.message));
@@ -93,7 +109,7 @@ export default function App() {
       });
       window.history.replaceState(null, "", `?project=${created.id}`);
       setProject(created);
-      setStateDirect(created.state);
+      setStateDirect(normalizeState(created.state));
       setHistory({ past: [], future: [] });
       setResult(null);
       setVersions(await listVersions(created.id));
@@ -126,6 +142,20 @@ export default function App() {
     }
   }
 
+  async function handleReschedule() {
+    if (!project || !state || !result || result.path.length === 0) return;
+    setBusy(true);
+    try {
+      await persist();
+      setResult(await rescheduleProject(project.id, state, result.path));
+      setMessage("已保留原几何路线，只重新安排到达、转向与等待时间。");
+    } catch (error) {
+      setMessage((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function createSavedVersion() {
     if (!project || !state) return;
     await saveVersion(project.id, versionName || `版本 ${versions.length + 1}`, state);
@@ -137,7 +167,7 @@ export default function App() {
     if (!project || !state) return;
     setHistory((old) => ({ past: [...old.past, state], future: [] }));
     const restored = await restoreVersion(version.id);
-    setStateDirect(restored.state);
+    setStateDirect(normalizeState(restored.state));
     setResult(null);
     setMessage(`已恢复：${version.name}`);
   }
@@ -145,6 +175,21 @@ export default function App() {
   function removeZone(id: string) {
     if (!state) return;
     setState({ ...state, forbidden_zones: state.forbidden_zones.filter((zone) => zone.id !== id) });
+  }
+
+  function removeClosureZone(id: string) {
+    if (!state) return;
+    setState({ ...state, closure_zones: state.closure_zones.filter((zone) => zone.id !== id) });
+  }
+
+  function updateClosureWindow(id: string, field: "close_start" | "close_end", value: number) {
+    if (!state) return;
+    setState({
+      ...state,
+      closure_zones: state.closure_zones.map((zone) =>
+        zone.id === id ? { ...zone, [field]: value } : zone
+      ),
+    });
   }
 
   return (
@@ -225,13 +270,37 @@ export default function App() {
               ))}
             </section>
             <section>
+              <h2>临时封路</h2>
+              {state.closure_zones.length === 0 && <p className="hint">画布选择“临时封路”后点击两个对角点。</p>}
+              {state.closure_zones.map((zone) => (
+                <div key={zone.id} className="zone-row">
+                  <span>{zone.width.toFixed(2)} × {zone.height.toFixed(2)} m</span>
+                  <label>封闭开始<input type="number" step="0.5" min="0" value={zone.close_start} onChange={(e) => updateClosureWindow(zone.id, "close_start", Number(e.target.value))} /></label>
+                  <label>开放时刻<input type="number" step="0.5" min="0" value={zone.close_end} onChange={(e) => updateClosureWindow(zone.id, "close_end", Number(e.target.value))} /></label>
+                  <button onClick={() => removeClosureZone(zone.id)}>删除</button>
+                </div>
+              ))}
+            </section>
+            <section>
               <h2>通过性</h2>
               <button disabled={busy} onClick={handleValidate}>检查起点到终点</button>
+              <button disabled={busy || !result || result.path.length === 0} onClick={handleReschedule}>保留几何重排时间</button>
               {result && (
                 <div className={result.passable ? "pass" : "fail"}>
-                  <strong>{result.passable ? "可以通过" : "不能通过"}</strong>
+                  <strong>{result.passable ? "可以通行" : `不可行（${result.status}）`}</strong>
                   <p>{result.reason}</p>
                   <small>算法版本：{result.algorithm}</small>
+                  {result.segments && result.segments.length > 0 && (
+                    <ol className="timeline">
+                      {result.segments.map((segment) => (
+                        <li key={segment.seq}>
+                          <code>{segment.t_start.toFixed(2)}–{segment.t_end.toFixed(2)}s</code>
+                          {" "}{segment.action}
+                          {segment.checkpoints_passed && ` 通过检查点 ${segment.checkpoints_passed.join(",")}`}
+                        </li>
+                      ))}
+                    </ol>
+                  )}
                 </div>
               )}
             </section>

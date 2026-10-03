@@ -30,10 +30,18 @@ def default_state(map_width: int, map_height: int, resolution: float) -> dict[st
     return {
         "origin": {"x": 0.0, "y": 0.0},
         "forbidden_zones": [],
+        "closure_zones": [],
+        "waiting_zones": [],
+        "checkpoints": [],
         "start": {"x": resolution, "y": resolution},
         "end": {"x": resolution, "y": map_height * resolution - resolution},
         "robot_width": 0.5,
         "robot_length": 0.8,
+        "start_orientation": 0.0,
+        "end_orientation": None,
+        "linear_speed": 0.5,
+        "angular_speed": 0.5,
+        "start_time": 0.0,
     }
 
 
@@ -168,6 +176,9 @@ async def validate_project(project_id: int, payload: PassageRequestModel) -> dic
     for checkpoint in state["checkpoints"]:
         if checkpoint["window_end"] < checkpoint["window_start"]:
             raise HTTPException(status_code=400, detail="checkpoint window end precedes start")
+    for zone in state["closure_zones"]:
+        if zone["close_end"] <= zone["close_start"]:
+            raise HTTPException(status_code=400, detail="closure window end must be after its start")
     try:
         result = validate_passage(
             grid,
@@ -182,9 +193,12 @@ async def validate_project(project_id: int, payload: PassageRequestModel) -> dic
             end_orientation=state["end_orientation"],
             checkpoints=state["checkpoints"],
             waiting_zones=state["waiting_zones"],
+            closure_zones=state["closure_zones"],
             linear_speed=state["linear_speed"],
             angular_speed=state["angular_speed"],
             start_time=state["start_time"],
+            keep_geometry=payload.keep_geometry,
+            geometric_path=payload.geometric_path,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -195,6 +209,7 @@ async def validate_project(project_id: int, payload: PassageRequestModel) -> dic
         {
             "status": result.get("status"),
             "schedule": result.get("schedule", []),
+            "segments": result.get("segments", []),
             "plans": result.get("plans", []),
             "algorithm": result.get("algorithm"),
             "map_updated_at": row["updated_at"],

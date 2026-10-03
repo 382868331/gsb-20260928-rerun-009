@@ -36,3 +36,14 @@ h2 { font-size: 16px; margin: 0 0 8px; }
 .pass { background: #dcfce7; }
 .fail { background: #fee2e2; }
 .pass p, .fail p { margin: 6px 0; font-size: 13px; }
+
+.timeline {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 12px;
+  text-align: left;
+}
+
+.timeline li { margin: 2px 0; }

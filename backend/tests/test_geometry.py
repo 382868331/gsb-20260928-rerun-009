@@ -90,21 +90,31 @@ def test_same_position_requires_real_orientation_change():
 
 
 def test_timed_checkpoints_require_order_window_and_waiting_area():
-    grid = empty_room()
+    # A 0.5 m wide straight corridor with a single waiting alcove: the
+    # rectangle cannot turn or loop inside, so any delay must happen as a
+    # real stop inside the declared waiting area.
+    rows, cols = 24, 36
+    grid = [[True] * cols for _ in range(rows)]
+    for row in range(16, 21):
+        for col in range(1, 35):
+            grid[row][col] = False
+    for row in range(15, 22):
+        for col in range(8, 12):
+            grid[row][col] = False
     origin = {"x": 0, "y": 0}
     start = {"x": 0.5, "y": 0.5}
     end = {"x": 3.0, "y": 0.5}
     checkpoints = [
         {
             "order": 0, "x": 1.2, "y": 0.5, "orientation": 0.0,
-            "window_start": 2.0, "window_end": 4.0,
+            "window_start": 4.0, "window_end": 6.0,
         },
         {
             "order": 1, "x": 2.2, "y": 0.5, "orientation": 0.0,
-            "window_start": 4.0, "window_end": 6.0,
+            "window_start": 6.0, "window_end": 9.0,
         },
     ]
-    waiting = [{"id": "w", "x": 0.4, "y": 0.3, "width": 0.6, "height": 0.6}]
+    waiting = [{"id": "w", "x": 0.8, "y": 0.2, "width": 0.4, "height": 0.7}]
     feasible = validate_passage(
         grid, [], 0.1, 0.3, 0.4, origin, start, end,
         start_orientation=0.0, end_orientation=0.0,
@@ -112,6 +122,18 @@ def test_timed_checkpoints_require_order_window_and_waiting_area():
     )
     assert feasible["status"] == "feasible"
     assert any(event["event"] == "wait" for event in feasible["schedule"])
+    # The feasible conclusion is backed by a replayable timeline: every wait
+    # happens inside the declared waiting area and checkpoint passes are
+    # recorded on the segment that crosses them.
+    waits = [event for event in feasible["schedule"] if event["event"] == "wait"]
+    assert all(event["wait_until"] > event["time"] for event in waits)
+    assert any(segment["action"] == "wait" for segment in feasible["segments"])
+    passed = [
+        segment["checkpoints_passed"]
+        for segment in feasible["segments"]
+        if "checkpoints_passed" in segment
+    ]
+    assert passed == [[0], [1]]
 
     # Without a waiting area the early window can still be met, but forcing an
     # early first window blocks the second one (window missed).
@@ -126,7 +148,7 @@ def test_timed_checkpoints_require_order_window_and_waiting_area():
         },
     ]
     result = validate_passage(
-        grid, [], 0.1, 0.3, 0.4, origin, start, end,
+        empty_room(), [], 0.1, 0.3, 0.4, origin, start, end,
         start_orientation=0.0, end_orientation=0.0,
         checkpoints=impossible, waiting_zones=[],
     )
@@ -139,7 +161,7 @@ def test_timed_checkpoint_orientation_mismatch_is_distinct():
     # sweep collides, even though reaching the point is easy.
     checkpoints = [
         {
-            "order": 0, "x": 0.35, "y": 0.5, "orientation": math.pi / 2,
+            "order": 0, "x": 0.15, "y": 0.5, "orientation": math.pi / 2,
             "window_start": 0.0, "window_end": 20.0,
         },
     ]

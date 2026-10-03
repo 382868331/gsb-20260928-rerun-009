@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
-import type { ForbiddenZone, MapState, Point, Project, ValidationResult } from "./types";
+import type { ClosureZone, ForbiddenZone, MapState, Point, Project, ValidationResult } from "./types";
 
-type Mode = "zone" | "start" | "end";
+type Mode = "zone" | "closure" | "start" | "end";
 
 type Props = {
   project: Project;
@@ -72,17 +72,25 @@ export function MapCanvas({ project, state, scale, result, onChange }: Props) {
     }
     const x = Math.min(draftPoint.x, point.x);
     const y = Math.min(draftPoint.y, point.y);
-    const zone: ForbiddenZone = {
-      id: crypto.randomUUID(),
-      x,
-      y,
-      width: Math.abs(point.x - draftPoint.x),
-      height: Math.abs(point.y - draftPoint.y),
-    };
+    const width = Math.abs(point.x - draftPoint.x);
+    const height = Math.abs(point.y - draftPoint.y);
     setDraftPoint(null);
-    if (zone.width >= project.resolution && zone.height >= project.resolution) {
-      onChange({ ...state, forbidden_zones: [...state.forbidden_zones, zone] });
+    if (width < project.resolution || height < project.resolution) return;
+    if (mode === "closure") {
+      const zone: ClosureZone = {
+        id: crypto.randomUUID(),
+        x,
+        y,
+        width,
+        height,
+        close_start: 0,
+        close_end: 10,
+      };
+      onChange({ ...state, closure_zones: [...state.closure_zones, zone] });
+      return;
     }
+    const zone: ForbiddenZone = { id: crypto.randomUUID(), x, y, width, height };
+    onChange({ ...state, forbidden_zones: [...state.forbidden_zones, zone] });
   }
 
   return (
@@ -90,6 +98,7 @@ export function MapCanvas({ project, state, scale, result, onChange }: Props) {
       <div className="tools">
         {([
           ["zone", "禁行区"],
+          ["closure", "临时封路"],
           ["start", "起点"],
           ["end", "终点"],
         ] as Array<[Mode, string]>).map(([value, label]) => (
@@ -140,6 +149,19 @@ export function MapCanvas({ project, state, scale, result, onChange }: Props) {
               height={zone.height}
               fill="rgba(239,68,68,0.35)"
               stroke="#dc2626"
+              strokeWidth={2 / scale}
+            />
+          ))}
+          {state.closure_zones.map((zone) => (
+            <rect
+              key={zone.id}
+              x={zone.x}
+              y={zone.y}
+              width={zone.width}
+              height={zone.height}
+              fill="rgba(234,88,12,0.35)"
+              stroke="#ea580c"
+              strokeDasharray="0.12 0.06"
               strokeWidth={2 / scale}
             />
           ))}

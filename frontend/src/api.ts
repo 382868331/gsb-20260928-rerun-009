@@ -37,6 +37,15 @@ export const validateProject = (id: number, state: MapState): Promise<Validation
     method: "POST",
     body: JSON.stringify({ state }),
   });
+export const rescheduleProject = (
+  id: number,
+  state: MapState,
+  geometricPath: Array<{ x: number; y: number; orientation: number }>
+): Promise<ValidationResult> =>
+  jsonFetch(`/api/projects/${id}/validate`, {
+    method: "POST",
+    body: JSON.stringify({ state, keep_geometry: true, geometric_path: geometricPath }),
+  });
 export const listVersions = (id: number): Promise<Version[]> =>
   jsonFetch(`/api/projects/${id}/versions`);
 export const saveVersion = (id: number, name: string, state: MapState) =>

@@ -16,6 +16,26 @@ ALGORITHM_VERSION = "rectangle-sweep-timed-checkpoints-v3"
 ORIENTATION_STEPS = 36
 ANGLE_SUBDIVISIONS = 5
 DEFAULT_SEARCH_BUDGET = 1_500_000
+EPS = 1e-9
+MOVES = ((-1, 0), (1, 0), (0, -1), (0, 1))
+
+
+def intervals_overlap(t0: float, t1: float, close_start: float, close_end: float) -> bool:
+    """Positive-length overlap of [t0, t1] with [close_start, close_end).
+
+    Boundary rule: finishing exactly at ``close_start`` counts as evacuated in
+    time, and starting exactly at ``close_end`` counts as allowed re-entry.
+    """
+    return t0 < close_end - EPS and t1 > close_start + EPS
+
+
+def closed_at(close_start: float, close_end: float, time: float) -> bool:
+    """Whether a pose held at ``time`` violates the closure.
+
+    The closure is active on [close_start, close_end): at ``close_start`` the
+    robot must already be outside, at ``close_end`` it may be inside again.
+    """
+    return close_start - EPS <= time < close_end - EPS
 
 
 @dataclass(frozen=True)
@@ -127,23 +147,77 @@ def build_orientation_layers(
     sweep = np.zeros((ORIENTATION_STEPS, *occupancy.shape), dtype=bool)
     orientations = np.arange(ORIENTATION_STEPS, dtype=float) * angle_step
     for layer, center_angle in enumerate(orientations):
-        pose_mask = _footprint_mask(
-            float(center_angle),
-            float(center_angle),
-            robot_width,
-            robot_length,
-            resolution,
-        )
-        sweep_mask = _footprint_mask(
-            float(center_angle - angle_step / 2.0),
-            float(center_angle + angle_step / 2.0),
-            robot_width,
-            robot_length,
-            resolution,
+        pose_mask, sweep_mask = _layer_masks(
+            float(center_angle), robot_width, robot_length, resolution
         )
         free[layer] = _free_centers_for_mask(occupancy, pose_mask)
         sweep[layer] = _free_centers_for_mask(occupancy, sweep_mask)
     return free, sweep, orientations
+
+
+def _layer_masks(
+    center_angle: float,
+    robot_width: float,
+    robot_length: float,
+    resolution: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    angle_step = 2.0 * math.pi / ORIENTATION_STEPS
+    pose_mask = _footprint_mask(
+        center_angle, center_angle, robot_width, robot_length, resolution
+    )
+    sweep_mask = _footprint_mask(
+        center_angle - angle_step / 2.0,
+        center_angle + angle_step / 2.0,
+        robot_width,
+        robot_length,
+        resolution,
+    )
+    return pose_mask, sweep_mask
+
+
+def build_closure_layers(
+    closure_zones: list[dict[str, Any]],
+    rows: int,
+    cols: int,
+    resolution: float,
+    origin: Point,
+    robot_width: float,
+    robot_length: float,
+) -> list[dict[str, Any]]:
+    """Per-closure time-dependent clearance arrays.
+
+    For each closure zone the same rectangle masks used for static obstacles
+    produce ``free``/``sweep``/``moves`` arrays: while the closure is active
+    the robot body (pose, turning sweep or translation sweep) must stay
+    completely outside the zone.
+    """
+    closures: list[dict[str, Any]] = []
+    angle_step = 2.0 * math.pi / ORIENTATION_STEPS
+    orientations = np.arange(ORIENTATION_STEPS, dtype=float) * angle_step
+    for zone in closure_zones:
+        occupancy = np.zeros((rows, cols), dtype=bool)
+        for cell in _zone_cells([zone], resolution, rows, cols, origin):
+            occupancy[cell] = True
+        free = np.zeros((ORIENTATION_STEPS, rows, cols), dtype=bool)
+        sweep = np.zeros((ORIENTATION_STEPS, rows, cols), dtype=bool)
+        for layer, center_angle in enumerate(orientations):
+            pose_mask, sweep_mask = _layer_masks(
+                float(center_angle), robot_width, robot_length, resolution
+            )
+            free[layer] = _free_centers_for_mask(occupancy, pose_mask)
+            sweep[layer] = _free_centers_for_mask(occupancy, sweep_mask)
+        moves = tuple(_move_free(free, direction) for direction in MOVES)
+        closures.append(
+            {
+                "id": zone.get("id", ""),
+                "close_start": float(zone["close_start"]),
+                "close_end": float(zone["close_end"]),
+                "free": free,
+                "sweep": sweep,
+                "moves": moves,
+            }
+        )
+    return closures
 
 
 def _move_free(free: np.ndarray, direction: tuple[int, int]) -> np.ndarray:
@@ -158,11 +232,11 @@ def _move_free(free: np.ndarray, direction: tuple[int, int]) -> np.ndarray:
     src_r_max = min(free.shape[1], free.shape[1] - dr)
     src_c_min = max(0, -dc)
     src_c_max = min(free.shape[2], free.shape[2] - dc)
-    dst_r_min, dst_r_max = src_r_min + dr, src_r_max + dr
-    dst_c_min, dst_c_max = src_c_min + dc, src_c_max + dc
     shifted = np.zeros_like(free)
-    shifted[:, dst_r_min:dst_r_max, dst_c_min:dst_c_max] = free[
-        :, src_r_min:src_r_max, src_c_min:src_c_max
+    # shifted[x] = free[x + direction], so the conjunction below marks a
+    # source cell safe only when the destination pose is collision free too.
+    shifted[:, src_r_min:src_r_max, src_c_min:src_c_max] = free[
+        :, src_r_min + dr:src_r_max + dr, src_c_min + dc:src_c_max + dc
     ]
     return free & shifted
 
@@ -220,11 +294,14 @@ def validate_passage(
     end_orientation: float | None = None,
     checkpoints: list[dict[str, Any]] | None = None,
     waiting_zones: list[dict[str, float]] | None = None,
+    closure_zones: list[dict[str, Any]] | None = None,
     linear_speed: float = 0.5,
     angular_speed: float = 0.5,
     start_time: float = 0.0,
     search_budget: int = DEFAULT_SEARCH_BUDGET,
     forbidden_wait_cells: list[tuple[int, int]] | None = None,
+    keep_geometry: bool = False,
+    geometric_path: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if robot_width <= 0 or robot_length <= 0:
         raise ValueError("robot dimensions must be positive")
@@ -246,6 +323,18 @@ def validate_passage(
     free, sweep, orientations = build_orientation_layers(
         occupancy, robot_width, robot_length, resolution
     )
+    closures = build_closure_layers(
+        closure_zones or [],
+        rows,
+        cols,
+        resolution,
+        map_origin,
+        robot_width,
+        robot_length,
+    )
+    for zone in closures:
+        if zone["close_end"] <= zone["close_start"]:
+            raise ValueError("closure window end must be after its start")
     angular_resolution = 2.0 * math.pi / ORIENTATION_STEPS
     start_layer = nearest_orientation_layer(start_orientation)
     end_layer = nearest_orientation_layer(
@@ -280,6 +369,25 @@ def validate_passage(
     can_right = _move_free(free, (0, 1))
     can_translate = (can_up, can_down, can_left, can_right)
 
+    # Start pose must not sit inside an active closure: the robot cannot
+    # already be somewhere it is forbidden to be at start_time.
+    for zone in closures:
+        if closed_at(zone["close_start"], zone["close_end"], float(start_time)) and not zone[
+            "free"
+        ][start_layer, start_row, start_col]:
+            return {
+                "passable": False,
+                "status": "blocked",
+                "reason": (
+                    "start pose is inside a temporarily closed region while that "
+                    "region is closed at the departure time"
+                ),
+                "algorithm": ALGORITHM_VERSION,
+                "path": [],
+                "angular_resolution": angular_resolution,
+                "search_completed": True,
+            }
+
     geometric = _geometric_bfs(
         free,
         sweep,
@@ -306,22 +414,30 @@ def validate_passage(
             "search_completed": True,
         }
 
-    if not checkpoints:
+    if not checkpoints and not closures and not keep_geometry:
         geometric["status"] = "feasible"
         geometric["search_completed"] = True
         return geometric
 
-    ordered = sorted(checkpoints, key=lambda item: int(item["order"]))
+    ordered = sorted(checkpoints or [], key=lambda item: int(item["order"]))
     checkpoint_specs = []
     for item in ordered:
         point = Point(float(item["x"]), float(item["y"]))
         cp_row, cp_col = world_to_grid(point, resolution, rows, map_origin)
         if not (0 <= cp_row < rows and 0 <= cp_col < cols):
             raise ValueError("checkpoint is outside the map")
-        tolerance = float(item.get("tolerance", max(resolution, 1.5 * resolution)))
+        # Missing and explicit-null tolerances share one default so a saved
+        # checkpoint without the optional fields validates identically.
+        raw_tolerance = item.get("tolerance")
+        if raw_tolerance is None:
+            raw_tolerance = max(resolution, 1.5 * resolution)
+        tolerance = float(raw_tolerance)
         tolerance_cells = max(1, int(round(tolerance / resolution)))
         wanted_layer = nearest_orientation_layer(float(item["orientation"]))
-        orient_tolerance = float(item.get("orientation_tolerance", angular_resolution / 2.0))
+        raw_orient = item.get("orientation_tolerance")
+        if raw_orient is None:
+            raw_orient = angular_resolution / 2.0
+        orient_tolerance = float(raw_orient)
         orient_steps = max(0, int(math.floor(orient_tolerance / angular_resolution)))
         layers = {
             (wanted_layer + delta) % ORIENTATION_STEPS
@@ -341,6 +457,29 @@ def validate_passage(
 
     wait_cells = _zone_cells(waiting_zones or [], resolution, rows, cols, map_origin)
     blocked_cells = set(forbidden_wait_cells or [])
+    if keep_geometry:
+        # Reschedule the previously returned geometry under the new windows
+        # and closures without letting the search pick a different route.
+        if not geometric_path:
+            raise ValueError("keep_geometry requires a geometric_path to reschedule")
+        return _schedule_fixed_path(
+            path=geometric_path,
+            specs=checkpoint_specs,
+            closures=closures,
+            free=free,
+            sweep=sweep,
+            can_translate=can_translate,
+            wait_cells=wait_cells - blocked_cells,
+            start_layer=start_layer,
+            end_layer=end_layer,
+            orientations=orientations,
+            resolution=resolution,
+            rows=rows,
+            map_origin=map_origin,
+            linear_speed=linear_speed,
+            angular_speed=angular_speed,
+            start_time=start_time,
+        )
     plans: list[dict[str, Any]] = []
     result: dict[str, Any] | None = None
     # Each rerun forbids wait cells used by the previous plan, producing
@@ -351,6 +490,7 @@ def validate_passage(
             sweep=sweep,
             can_translate=can_translate,
             specs=checkpoint_specs,
+            closures=closures,
             wait_cells=wait_cells - blocked_cells,
             start_layer=start_layer,
             start_row=start_row,
@@ -390,6 +530,7 @@ def validate_passage(
         # was forbidden; the already found schedules remain valid.
         result["plans"] = plans
         result["schedule"] = plans[0]["schedule"]
+        result["segments"] = plans[0]["segments"]
         result["status"] = "feasible"
         result["passable"] = True
         result["reason"] = (
@@ -537,6 +678,7 @@ def _timed_search(
     sweep: np.ndarray,
     can_translate: tuple[np.ndarray, ...],
     specs: list[dict[str, Any]],
+    closures: list[dict[str, Any]],
     wait_cells: set[tuple[int, int]],
     start_layer: int,
     start_row: int,
@@ -560,6 +702,42 @@ def _timed_search(
     turn_cost = angle_step / angular_speed
     moves = ((-1, 0), (1, 0), (0, -1), (0, 1))
     completed = True
+
+    def pose_clear_time(layer, row, col, t0, t1):
+        # A pose held over [t0, t1] must keep the whole rectangle outside
+        # every closure that is active during that interval.
+        for zone in closures:
+            if intervals_overlap(t0, t1, zone["close_start"], zone["close_end"]) and not zone[
+                "free"
+            ][layer, row, col]:
+                return False
+        return True
+
+    def move_clear_time(move_index, layer, row, col, t0, t1):
+        for zone in closures:
+            if intervals_overlap(t0, t1, zone["close_start"], zone["close_end"]) and not zone[
+                "moves"
+            ][move_index][layer, row, col]:
+                return False
+        return True
+
+    def turn_clear_time(next_layer, row, col, t0, t1):
+        for zone in closures:
+            if intervals_overlap(t0, t1, zone["close_start"], zone["close_end"]) and not zone[
+                "sweep"
+            ][next_layer, row, col]:
+                return False
+        return True
+
+    def pose_clear_instant(layer, row, col, time):
+        # Boundary rule: at close_start the body must already be fully
+        # outside, so a pose held at that exact instant is checked too.
+        for zone in closures:
+            if closed_at(zone["close_start"], zone["close_end"], time) and not zone[
+                "free"
+            ][layer, row, col]:
+                return False
+        return True
 
     initial_progress = _checkpoint_progress(
         0, start_layer, start_row, start_col, specs, float(start_time)
@@ -609,8 +787,15 @@ def _timed_search(
         if progress == len(specs) and (layer, row, col) == (
             end_layer, end_row, end_col
         ):
-            goal_key = key
-            break
+            # The robot stops here forever, so the end pose must also survive
+            # every closure that has not fully passed yet.
+            if all(
+                zone["close_end"] <= time + EPS or zone["free"][layer, row, col]
+                for zone in closures
+            ):
+                goal_key = key
+                break
+            continue
         expansions += 1
         if expansions > search_budget:
             completed = False
@@ -635,59 +820,86 @@ def _timed_search(
             continue
 
         # In a legal waiting area the robot may hold this pose until the next
-        # window opens and then depart. Generate the delayed departures
-        # explicitly: a plain self-edge would be dominated by the earlier
-        # arrival label. Waiting in a corridor is impossible because only
-        # declared waiting cells receive these edges.
-        if (
-            progress < len(specs)
-            and (row, col) in wait_cells
-            and time < specs[progress]["window_start"]
-        ):
-            resume = specs[progress]["window_start"]
-            for move_index, (dr, dc) in enumerate(moves):
-                next_row, next_col = row + dr, col + dc
-                if not (0 <= next_row < rows and 0 <= next_col < cols):
-                    continue
-                if not can_translate[move_index][layer, row, col]:
-                    continue
-            arrival = resume + move_cost
-            next_progress = _checkpoint_progress(
-                progress, layer, next_row, next_col, specs, arrival
-            )
-            if not may_enter(progress, next_row, next_col, arrival):
-                continue
-                relax(
-                    (next_progress, layer, next_row, next_col),
-                    arrival,
-                    key,
-                    "wait_move",
-                    resume,
-                )
-            for next_layer in (
-                (layer - 1) % ORIENTATION_STEPS,
-                (layer + 1) % ORIENTATION_STEPS,
+        # window opens or a blocking closure ends, and then depart. Generate
+        # the delayed departures explicitly: a plain self-edge would be
+        # dominated by the earlier arrival label. Waiting in a corridor is
+        # impossible because only declared waiting cells receive these edges,
+        # and a waiting spot inside an active closure is no shelter either.
+        if (row, col) in wait_cells:
+            resume_candidates: list[float] = []
+            if (
+                progress < len(specs)
+                and time < specs[progress]["window_start"] - EPS
             ):
-                if not sweep[next_layer, row, col]:
+                resume_candidates.append(specs[progress]["window_start"])
+            for zone in closures:
+                # Any closure that has not fully ended may force a stop here:
+                # reaching its edge later without a waiting cell is a dead
+                # end, so the safe stop must be offered upstream already.
+                if zone["close_end"] > time + EPS:
+                    resume_candidates.append(zone["close_end"])
+            for resume in resume_candidates:
+                # The whole stop must keep the body outside every active
+                # closure for its full duration.
+                if not pose_clear_time(layer, row, col, time, resume):
                     continue
-                arrival = resume + turn_cost
-                next_progress = _checkpoint_progress(
-                    progress, next_layer, row, col, specs, arrival
+                if not pose_clear_instant(layer, row, col, resume):
+                    continue
+                for move_index, (dr, dc) in enumerate(moves):
+                    next_row, next_col = row + dr, col + dc
+                    if not (0 <= next_row < rows and 0 <= next_col < cols):
+                        continue
+                    if not can_translate[move_index][layer, row, col]:
+                        continue
+                    arrival = resume + move_cost
+                    if not move_clear_time(move_index, layer, row, col, resume, arrival):
+                        continue
+                    if not pose_clear_instant(layer, next_row, next_col, arrival):
+                        continue
+                    next_progress = _checkpoint_progress(
+                        progress, layer, next_row, next_col, specs, arrival
+                    )
+                    if not may_enter(progress, next_row, next_col, arrival):
+                        continue
+                    relax(
+                        (next_progress, layer, next_row, next_col),
+                        arrival,
+                        key,
+                        "wait_move",
+                        resume,
+                    )
+                for next_layer in (
+                    (layer - 1) % ORIENTATION_STEPS,
+                    (layer + 1) % ORIENTATION_STEPS,
+                ):
+                    if not sweep[next_layer, row, col]:
+                        continue
+                    arrival = resume + turn_cost
+                    if not turn_clear_time(next_layer, row, col, resume, arrival):
+                        continue
+                    if not pose_clear_instant(next_layer, row, col, arrival):
+                        continue
+                    next_progress = _checkpoint_progress(
+                        progress, next_layer, row, col, specs, arrival
+                    )
+                    if not may_enter(progress, row, col, arrival):
+                        continue
+                    relax(
+                        (next_progress, next_layer, row, col),
+                        arrival,
+                        key,
+                        "wait_turn",
+                        resume,
+                    )
+                # Record the delayed label at the same pose regardless of
+                # whether the checkpoint is crossed on resume: the robot may
+                # hold any legal waiting cell, and reconstruction keeps it.
+                resume_progress = _checkpoint_progress(
+                    progress, layer, row, col, specs, resume
                 )
-                if not may_enter(progress, row, col, arrival):
-                    continue
                 relax(
-                    (next_progress, next_layer, row, col), arrival, key, "wait_turn", resume
+                    (resume_progress, layer, row, col), resume, key, "wait_here", resume
                 )
-            # Record the delayed label at the same pose regardless of whether
-            # the checkpoint is crossed on resume: the robot may hold any legal
-            # waiting cell, and reconstruction must keep the stop.
-            resume_progress = _checkpoint_progress(
-                progress, layer, row, col, specs, resume
-            )
-            relax(
-                (resume_progress, layer, row, col), resume, key, "wait_here", resume
-            )
 
         for move_index, (dr, dc) in enumerate(moves):
             next_row, next_col = row + dr, col + dc
@@ -696,6 +908,10 @@ def _timed_search(
             if not can_translate[move_index][layer, row, col]:
                 continue
             arrival = time + move_cost
+            if not move_clear_time(move_index, layer, row, col, time, arrival):
+                continue
+            if not pose_clear_instant(layer, next_row, next_col, arrival):
+                continue
             next_progress = _checkpoint_progress(
                 progress, layer, next_row, next_col, specs, arrival
             )
@@ -718,6 +934,10 @@ def _timed_search(
             if not sweep[next_layer, row, col]:
                 continue
             arrival = time + turn_cost
+            if not turn_clear_time(next_layer, row, col, time, arrival):
+                continue
+            if not pose_clear_instant(next_layer, row, col, arrival):
+                continue
             next_progress = _checkpoint_progress(
                 progress, next_layer, row, col, specs, arrival
             )
@@ -767,14 +987,16 @@ def _timed_search(
         }
 
     schedule = _reconstruct_schedule(
-        goal_key, parents, orientations, resolution, rows, map_origin
+        goal_key, parents, orientations, resolution, rows, map_origin, specs
     )
+    segments = _build_segments(schedule)
     plan = {
         "id": 0,
         "label": "最早到达方案",
         "feasible": True,
         "arrival_time": schedule[-1]["time"],
         "schedule": schedule,
+        "segments": segments,
         "waiting_cells": sorted(
             {
                 (item["row"], item["col"])
@@ -789,6 +1011,7 @@ def _timed_search(
         "status": "feasible",
         "reason": "all ordered checkpoints are reached inside their time windows with the required orientation",
         "schedule": schedule,
+        "segments": segments,
         "plans": [plan],
         "search_completed": True,
     }
@@ -850,8 +1073,12 @@ def _diagnose_timed_failure(
             for layer in layers:
                 for row in range(row_lo, row_hi):
                     for col in range(col_lo, col_hi):
-                        if (index, layer, row, col) in seen:
-                            return True
+                        for progress in range(len(specs) + 1):
+                            # Entering the region already advances the
+                            # checkpoint progress, so a passed checkpoint
+                            # shows up under a later progress label.
+                            if (progress, layer, row, col) in seen:
+                                return True
             return False
 
         if not reachable_in(range(ORIENTATION_STEPS)):
@@ -886,18 +1113,47 @@ def _reconstruct_schedule(
     resolution: float,
     rows: int,
     map_origin: Point,
+    specs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
+    # Walk the parent chain once so waits can be split into a stop at the
+    # waiting pose followed by the delayed departure action.
+    chain: list[tuple[Any, Any, str, float, float | None]] = []
     key: Any = goal_key
     while key is not None:
         parent, action, time, wait_resume = parents[key]
+        chain.append((key, parent, action, time, wait_resume))
+        key = parent
+    chain.reverse()
+
+    events: list[dict[str, Any]] = []
+    previous_progress = 0
+    for index, (key, parent, action, time, wait_resume) in enumerate(chain):
         progress, layer, row, col = key
         point = grid_to_world(row, col, resolution, rows, map_origin)
+        if action.startswith("wait") and parent is not None:
+            _, parent_layer, parent_row, parent_col = parent
+            wait_point = grid_to_world(parent_row, parent_col, resolution, rows, map_origin)
+            # The stop happens at the waiting pose; only then does the delayed
+            # action depart, so a replay can hold the robot inside the area.
+            events.append(
+                {
+                    "event": "wait",
+                    "time": events[-1]["time"] if events else time,
+                    "wait_until": wait_resume,
+                    "wait_action": action,
+                    "x": wait_point.x,
+                    "y": wait_point.y,
+                    "orientation": float(orientations[parent_layer]),
+                    "row": parent_row,
+                    "col": parent_col,
+                    "checkpoint": previous_progress,
+                }
+            )
+            action = {"wait_move": "move", "wait_turn": "turn", "wait_here": "hold"}[action]
         events.append(
             {
                 "event": action,
                 "time": time,
-                "wait_resume": wait_resume,
                 "x": point.x,
                 "y": point.y,
                 "orientation": float(orientations[layer]),
@@ -906,20 +1162,310 @@ def _reconstruct_schedule(
                 "checkpoint": progress,
             }
         )
-        key = parent
-    events.reverse()
-
-    # A wait self-edge stores the resume time; surface both the start and end
-    # of the stop so callers can verify the robot stays inside the waiting area.
-    for index, event in enumerate(events):
-        if event["event"].startswith("wait"):
-            resume = event.pop("wait_resume")
-            previous_time = events[index - 1]["time"] if index else resume
-            action = event["event"]
-            event["event"] = "wait"
-            event["time"] = previous_time
-            event["wait_until"] = resume
-            event["wait_action"] = action
-        else:
-            event.pop("wait_resume", None)
+        if progress > previous_progress:
+            # Record exactly which ordered checkpoints this state passed so the
+            # conclusion can be replayed checkpoint by checkpoint.
+            events[-1]["checkpoints_passed"] = [
+                specs[step]["order"] for step in range(previous_progress, progress)
+            ]
+        previous_progress = progress
     return events
+
+
+def _build_segments(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Compress the event stream into consecutive replay segments.
+
+    Each segment is one atomic phase (move / turn / wait / hold) with its own
+    time interval and endpoint poses, so a feasible answer can be replayed
+    segment by segment instead of trusting the final conclusion.
+    """
+    segments: list[dict[str, Any]] = []
+    for index in range(1, len(events)):
+        previous = events[index - 1]
+        current = events[index]
+        if current["event"] == "wait":
+            action = "wait"
+            t_end = current["wait_until"]
+        else:
+            action = current["event"]
+            t_end = current["time"]
+        if current["event"] != "wait" and previous["event"] == "wait":
+            # The departure after a stop leaves at the resume time, not at
+            # the moment the robot arrived at the waiting pose.
+            t_start = previous["wait_until"]
+        elif current["event"] == "wait":
+            t_start = current["time"]
+        else:
+            t_start = previous["time"]
+        segment = {
+            "seq": len(segments),
+            "action": action,
+            "t_start": t_start,
+            "t_end": t_end,
+            "from": {
+                "x": previous["x"],
+                "y": previous["y"],
+                "orientation": previous["orientation"],
+            },
+            "to": {
+                "x": current["x"],
+                "y": current["y"],
+                "orientation": current["orientation"],
+            },
+        }
+        if current["event"] == "wait":
+            segment["to"] = segment["from"]
+        if "checkpoints_passed" in current:
+            segment["checkpoints_passed"] = current["checkpoints_passed"]
+        segments.append(segment)
+    return segments
+
+
+def _schedule_fixed_path(
+    *,
+    path: list[dict[str, Any]],
+    specs: list[dict[str, Any]],
+    closures: list[dict[str, Any]],
+    free: np.ndarray,
+    sweep: np.ndarray,
+    can_translate: tuple[np.ndarray, ...],
+    wait_cells: set[tuple[int, int]],
+    start_layer: int,
+    end_layer: int,
+    orientations: np.ndarray,
+    resolution: float,
+    rows: int,
+    map_origin: Point,
+    linear_speed: float,
+    angular_speed: float,
+    start_time: float,
+) -> dict[str, Any]:
+    """Reschedule a previously found geometry under new windows/closures.
+
+    The route is fixed; only departure times and waiting stops are chosen.
+    Failure separates a pose that no longer fits (``pose_mismatch``) from a
+    route that simply cannot be timed any more (``unschedulable``).
+    """
+    cols = free.shape[2]
+    angle_step = 2.0 * math.pi / ORIENTATION_STEPS
+    move_cost = resolution / linear_speed
+    turn_cost = angle_step / angular_speed
+
+    def fail(status: str, reason: str) -> dict[str, Any]:
+        return {
+            "passable": False,
+            "status": status,
+            "reason": reason,
+            "algorithm": ALGORITHM_VERSION,
+            "path": path,
+            "schedule": [],
+            "segments": [],
+            "plans": [],
+            "angular_resolution": angle_step,
+            "search_completed": True,
+            "geometry_kept": True,
+        }
+
+    nodes: list[tuple[int, int, int]] = []
+    for node in path:
+        row, col = world_to_grid(
+            Point(float(node["x"]), float(node["y"])), resolution, rows, map_origin
+        )
+        layer = nearest_orientation_layer(float(node.get("orientation", 0.0)))
+        nodes.append((layer, row, col))
+    if not nodes:
+        return fail("pose_mismatch", "the kept geometric path is empty")
+    if nodes[0][0] != start_layer or nodes[-1][0] != end_layer:
+        return fail(
+            "pose_mismatch",
+            "the kept geometric path does not connect the required start and end poses",
+        )
+
+    for index, (layer, row, col) in enumerate(nodes):
+        if not (0 <= row < rows and 0 <= col < cols) or not free[layer, row, col]:
+            return fail(
+                "pose_mismatch",
+                f"kept path pose {index} collides with an obstacle for the complete rectangle footprint",
+            )
+
+    # Steps between consecutive nodes: in-place turns layer by layer, or
+    # single-cell translations. Anything else cannot be replayed as-is.
+    steps: list[tuple[str, float, int | None, int]] = []
+    for index in range(1, len(nodes)):
+        layer0, row0, col0 = nodes[index - 1]
+        layer1, row1, col1 = nodes[index]
+        if (row0, col0) == (row1, col1) and layer0 == layer1:
+            continue
+        if (row0, col0) == (row1, col1):
+            clockwise = (layer1 - layer0) % ORIENTATION_STEPS
+            counter = (layer0 - layer1) % ORIENTATION_STEPS
+            count = min(clockwise, counter)
+            direction = 1 if clockwise <= counter else -1
+            layer = layer0
+            for _ in range(count):
+                nxt = (layer + direction) % ORIENTATION_STEPS
+                if not sweep[nxt, row0, col0]:
+                    return fail(
+                        "pose_mismatch",
+                        f"kept path turn at node {index} sweeps the rectangle through an obstacle",
+                    )
+                layer = nxt
+            steps.append(("turn", count * turn_cost, None, index))
+        elif layer0 == layer1 and abs(row1 - row0) + abs(col1 - col0) == 1:
+            move_index = MOVES.index((row1 - row0, col1 - col0))
+            if not can_translate[move_index][layer0, row0, col0]:
+                return fail(
+                    "pose_mismatch",
+                    f"kept path move at node {index} collides for the complete rectangle footprint",
+                )
+            steps.append(("move", move_cost, move_index, index))
+        else:
+            return fail(
+                "pose_mismatch",
+                "the kept geometric path is not replayable cell by cell with the required poses",
+            )
+
+    def pose_event(action: str, time: float, node_index: int, progress: int) -> dict[str, Any]:
+        layer, row, col = nodes[node_index]
+        point = grid_to_world(row, col, resolution, rows, map_origin)
+        return {
+            "event": action,
+            "time": time,
+            "x": point.x,
+            "y": point.y,
+            "orientation": float(orientations[layer]),
+            "row": row,
+            "col": col,
+            "checkpoint": progress,
+        }
+
+    progress = _checkpoint_progress(
+        0, nodes[0][0], nodes[0][1], nodes[0][2], specs, float(start_time)
+    )
+    for zone in closures:
+        if closed_at(zone["close_start"], zone["close_end"], float(start_time)) and not zone[
+            "free"
+        ][nodes[0]]:
+            return fail(
+                "unschedulable",
+                "the kept geometry starts inside a region that is closed at the departure time",
+            )
+
+    events = [pose_event("start", float(start_time), 0, progress)]
+    time = float(start_time)
+    node_index = 0
+    for action, duration, move_index, target_index in steps:
+        layer, row, col = nodes[node_index]
+        target_layer, target_row, target_col = nodes[target_index]
+        while True:
+            arrival = time + duration
+            resume: float | None = None
+            for zone in closures:
+                if not intervals_overlap(
+                    time, arrival, zone["close_start"], zone["close_end"]
+                ):
+                    continue
+                if action == "move":
+                    clear = bool(zone["moves"][move_index][layer, row, col])
+                else:
+                    clear = bool(zone["sweep"][target_layer, row, col])
+                if not clear:
+                    resume = zone["close_end"] if resume is None else max(resume, zone["close_end"])
+                # A pose held exactly at close_start counts as still inside.
+                if closed_at(zone["close_start"], zone["close_end"], arrival) and not zone[
+                    "free"
+                ][target_layer, target_row, target_col]:
+                    resume = (
+                        zone["close_end"]
+                        if resume is None
+                        else max(resume, zone["close_end"])
+                    )
+            if progress < len(specs):
+                spec = specs[progress]
+                # Entering the next checkpoint tolerance region before its
+                # window opens means the kept route arrives too early.
+                if (
+                    abs(target_row - spec["row"]) <= spec["tolerance_cells"]
+                    and abs(target_col - spec["col"]) <= spec["tolerance_cells"]
+                    and target_layer in spec["layers"]
+                    and arrival < spec["window_start"] - EPS
+                ):
+                    resume = (
+                        spec["window_start"]
+                        if resume is None
+                        else max(resume, spec["window_start"])
+                    )
+            if resume is None:
+                break
+            if (row, col) not in wait_cells:
+                return fail(
+                    "unschedulable",
+                    "the kept geometry needs a stop outside every declared waiting area",
+                )
+            shelter = all(
+                not intervals_overlap(time, resume, zone["close_start"], zone["close_end"])
+                or bool(zone["free"][layer, row, col])
+                for zone in closures
+            )
+            if not shelter:
+                return fail(
+                    "unschedulable",
+                    "the only waiting position on the kept geometry is itself closed during the wait",
+                )
+            wait_event = pose_event("wait", time, node_index, progress)
+            wait_event["wait_until"] = resume
+            events.append(wait_event)
+            time = resume
+        time = arrival
+        progress = _checkpoint_progress(
+            progress, target_layer, target_row, target_col, specs, time
+        )
+        events.append(pose_event(action, time, target_index, progress))
+        node_index = target_index
+        if progress < len(specs) and time > specs[progress]["window_end"] + EPS:
+            return fail(
+                "unschedulable",
+                "a checkpoint window closes before the kept geometry reaches it",
+            )
+
+    if progress < len(specs):
+        return fail(
+            "unschedulable",
+            "the kept geometry cannot pass every ordered checkpoint inside its window",
+        )
+    end_layer_actual, end_row, end_col = nodes[-1]
+    for zone in closures:
+        if zone["close_end"] > time + EPS and not zone["free"][end_layer_actual, end_row, end_col]:
+            return fail(
+                "unschedulable",
+                "the kept geometry ends inside a region that closes after the arrival time",
+            )
+
+    segments = _build_segments(events)
+    plan = {
+        "id": 0,
+        "label": "保留几何重排时间",
+        "feasible": True,
+        "arrival_time": events[-1]["time"],
+        "schedule": events,
+        "segments": segments,
+        "waiting_cells": sorted(
+            {(event["row"], event["col"]) for event in events if event["event"] == "wait"}
+        ),
+    }
+    return {
+        "passable": True,
+        "status": "feasible",
+        "reason": (
+            "kept the previous geometry and rescheduled arrivals, turns and "
+            "waits under the new checkpoint windows and closures"
+        ),
+        "algorithm": ALGORITHM_VERSION,
+        "path": path,
+        "schedule": events,
+        "segments": segments,
+        "plans": [plan],
+        "angular_resolution": angle_step,
+        "search_completed": True,
+        "geometry_kept": True,
+    }

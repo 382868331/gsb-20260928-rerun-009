@@ -56,6 +56,8 @@ export const saveVersion = (id: number, name: string, state: MapState) =>
     method: "POST",
     body: JSON.stringify({ name, state }),
   });
-export async function restoreVersion(versionId: number): Promise<{ state: MapState }> {
+export async function restoreVersion(
+  versionId: number,
+): Promise<{ state: MapState; state_defaults?: string[] }> {
   return jsonFetch(`/api/versions/${versionId}/restore`, { method: "POST" });
 }

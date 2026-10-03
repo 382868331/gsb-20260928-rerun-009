@@ -16,6 +16,36 @@ const STORAGE_KEY = "robot-map-editor-draft";
 
 type EditHistory = { past: MapState[]; future: MapState[] };
 
+const STATE_DEFAULTS: MapState = {
+  origin: { x: 0, y: 0 },
+  forbidden_zones: [],
+  timed_zones: [],
+  waiting_zones: [],
+  checkpoints: [],
+  start: null,
+  end: null,
+  robot_width: 0.5,
+  robot_length: 0.8,
+  start_orientation: 0,
+  end_orientation: null,
+  linear_speed: 0.5,
+  angular_speed: 0.5,
+  start_time: 0,
+};
+
+function normalizeState(raw: Partial<MapState> | null | undefined): MapState {
+  return { ...STATE_DEFAULTS, ...(raw ?? {}) };
+}
+
+function legacyNotice(defaults: string[] | undefined): string {
+  if (!defaults || defaults.length === 0) return "";
+  return (
+    "旧工程缺少新增字段（" +
+    defaults.join("、") +
+    "），已按默认值补齐；检查点与封路尚未验证，请重新检查后再保存。"
+  );
+}
+
 function segmentLabel(segment: import("./types").Segment): string {
   const when =
     segment.time !== undefined
@@ -60,9 +90,25 @@ export default function App() {
     if (!projectId) return;
     getProject(Number(projectId)).then((loaded) => {
       setProject(loaded);
-      setStateDirect(loaded.state);
+      let initial = normalizeState(loaded.state);
+      let notice = legacyNotice(loaded.state_defaults);
+      try {
+        const draftRaw = localStorage.getItem(STORAGE_KEY);
+        if (draftRaw) {
+          const draft = JSON.parse(draftRaw);
+          if (draft.projectId === loaded.id && draft.state) {
+            initial = normalizeState(draft.state);
+            notice =
+              "已找回刷新前未保存的编辑草稿。" + (notice ? " " + notice : "");
+          }
+        }
+      } catch {
+        // 草稿损坏时忽略，使用服务器状态
+      }
+      setStateDirect(initial);
       setResolution(loaded.resolution);
       listVersions(loaded.id).then(setVersions);
+      if (notice) setMessage(notice);
     }).catch((error) => setMessage(error.message));
   }, [projectId]);
 
@@ -115,7 +161,7 @@ export default function App() {
       });
       window.history.replaceState(null, "", `?project=${created.id}`);
       setProject(created);
-      setStateDirect(created.state);
+      setStateDirect(normalizeState(created.state));
       setHistory({ past: [], future: [] });
       setResult(null);
       setVersions(await listVersions(created.id));
@@ -189,9 +235,10 @@ export default function App() {
     if (!project || !state) return;
     setHistory((old) => ({ past: [...old.past, state], future: [] }));
     const restored = await restoreVersion(version.id);
-    setStateDirect(restored.state);
+    setStateDirect(normalizeState(restored.state));
     setResult(null);
-    setMessage(`已恢复：${version.name}`);
+    const notice = legacyNotice(restored.state_defaults);
+    setMessage(`已恢复：${version.name}` + (notice ? `。 ${notice}` : ""));
   }
 
   function removeZone(id: string) {

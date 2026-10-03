@@ -2,6 +2,47 @@ import httpx
 import pytest
 
 
+@pytest.mark.anyio
+async def test_legacy_project_state_gets_explicit_defaults(client):
+    from app import main
+
+    project = (await client.post("/api/projects", data={"name": "legacy"})).json()
+    project_id = project["id"]
+    legacy_state = {
+        "origin": {"x": 0.0, "y": 0.0},
+        "forbidden_zones": [],
+        "start": {"x": 0.1, "y": 0.1},
+        "end": {"x": 0.1, "y": 2.0},
+        "robot_width": 0.5,
+        "robot_length": 0.8,
+    }
+    import json
+
+    with main.store.connect() as conn:
+        conn.execute(
+            "UPDATE projects SET state = ? WHERE id = ?",
+            (json.dumps(legacy_state), project_id),
+        )
+        conn.execute(
+            "INSERT INTO versions (project_id, name, state, created_at) VALUES (?, ?, ?, ?)",
+            (project_id, "旧版存档", json.dumps(legacy_state), "2026-01-01T00:00:00+00:00"),
+        )
+
+    loaded = (await client.get(f"/api/projects/{project_id}")).json()
+    assert loaded["state"]["checkpoints"] == []
+    assert loaded["state"]["timed_zones"] == []
+    assert loaded["state"]["waiting_zones"] == []
+    assert loaded["state"]["start_orientation"] == 0.0
+    assert "checkpoints" in loaded["state_defaults"]
+    assert "timed_zones" in loaded["state_defaults"]
+
+    versions = (await client.get(f"/api/projects/{project_id}/versions")).json()
+    legacy_version = next(item for item in versions if item["name"] == "旧版存档")
+    restored = (await client.post(f"/api/versions/{legacy_version['id']}/restore")).json()
+    assert restored["state"]["checkpoints"] == []
+    assert "checkpoints" in restored["state_defaults"]
+
+
 @pytest.fixture
 async def client(tmp_path):
     from app import main

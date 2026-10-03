@@ -49,6 +49,7 @@ export type Project = {
   width: number;
   height: number;
   state: MapState;
+  state_defaults?: string[];
   grid: boolean[][];
   original_url: string;
   updated_at: string;

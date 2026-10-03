@@ -30,15 +30,52 @@ def default_state(map_width: int, map_height: int, resolution: float) -> dict[st
     return {
         "origin": {"x": 0.0, "y": 0.0},
         "forbidden_zones": [],
+        "timed_zones": [],
+        "waiting_zones": [],
+        "checkpoints": [],
         "start": {"x": resolution, "y": resolution},
         "end": {"x": resolution, "y": map_height * resolution - resolution},
         "robot_width": 0.5,
         "robot_length": 0.8,
+        "start_orientation": 0.0,
+        "end_orientation": None,
+        "linear_speed": 0.5,
+        "angular_speed": 0.5,
+        "start_time": 0.0,
     }
+
+
+def normalize_state(state: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """补齐旧工程缺少的新增字段，返回 (完整状态, 实际补过的字段名)。
+
+    旧版本工程没有检查点/限时封路等字段；这里只补显式默认值，
+    不虚构检查点，也不把补齐后的状态标记为已验证。
+    """
+
+    defaults: dict[str, Any] = {
+        "origin": {"x": 0.0, "y": 0.0},
+        "forbidden_zones": [],
+        "timed_zones": [],
+        "waiting_zones": [],
+        "checkpoints": [],
+        "start": None,
+        "end": None,
+        "robot_width": 0.5,
+        "robot_length": 0.8,
+        "start_orientation": 0.0,
+        "end_orientation": None,
+        "linear_speed": 0.5,
+        "angular_speed": 0.5,
+        "start_time": 0.0,
+    }
+    applied = [key for key in defaults if key not in state]
+    merged = {key: state.get(key, value) for key, value in defaults.items()}
+    return merged, applied
 
 
 def serialize_project(row) -> dict[str, Any]:
     map_data = json.loads(row["map_data"])
+    state, applied = normalize_state(json.loads(row["state"]))
     return {
         "id": row["id"],
         "name": row["name"],
@@ -46,7 +83,8 @@ def serialize_project(row) -> dict[str, Any]:
         "threshold": row["threshold"],
         "width": row["width"],
         "height": row["height"],
-        "state": json.loads(row["state"]),
+        "state": state,
+        "state_defaults": applied,
         "grid": map_data["grid"],
         "original_url": f"/api/projects/{row['id']}/original",
         "created_at": row["created_at"],
@@ -153,7 +191,8 @@ async def restore_version(version_id: int) -> dict[str, Any]:
     state = store.restore_version(version_id)
     if state is None:
         raise HTTPException(status_code=404, detail="version not found")
-    return {"state": state}
+    merged, applied = normalize_state(state)
+    return {"state": merged, "state_defaults": applied}
 
 
 @app.post("/api/projects/{project_id}/validate")
@@ -201,7 +240,6 @@ async def validate_project(project_id: int, payload: PassageRequestModel) -> dic
             "plans": result.get("plans", []),
             "segments": result.get("segments", []),
             "replay": result.get("replay", {}),
-            "status": result.get("status"),
             "algorithm": result.get("algorithm"),
             "map_updated_at": row["updated_at"],
         },

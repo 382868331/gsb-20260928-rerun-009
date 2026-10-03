@@ -36,3 +36,40 @@ h2 { font-size: 16px; margin: 0 0 8px; }
 .pass { background: #dcfce7; }
 .fail { background: #fee2e2; }
 .pass p, .fail p { margin: 6px 0; font-size: 13px; }
+
+.timed-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.timed-row label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+}
+
+.timed-row input {
+  width: 90px;
+}
+
+.inline-check {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.segments {
+  max-height: 220px;
+  overflow: auto;
+  font-size: 12px;
+  padding-left: 18px;
+  margin: 6px 0;
+}
+
+.segments li {
+  margin-bottom: 2px;
+}

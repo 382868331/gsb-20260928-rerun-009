@@ -157,15 +157,19 @@ class Store:
                 "SELECT id, result, state, created_at FROM plans WHERE project_id = ? ORDER BY id DESC LIMIT 20",
                 (project_id,),
             ).fetchall()
-            return [
+        return [
                 {
                     "id": row["id"],
                     "created_at": row["created_at"],
                     "result": json.loads(row["result"]),
                     "state": json.loads(row["state"]),
                 }
-                for row in rows
-            ]
+            for row in rows
+        ]
+
+    def get_plan(self, plan_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
 
     def restore_version(self, version_id: int) -> dict[str, Any] | None:
         version = self.get_version(version_id)

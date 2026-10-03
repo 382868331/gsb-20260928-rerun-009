@@ -1,4 +1,4 @@
-import type { MapState, Project, ValidationResult, Version } from "./types";
+import type { MapState, Point, Project, ValidationResult, Version } from "./types";
 
 async function jsonFetch(url: string, init?: RequestInit): Promise<any> {
   const response = await fetch(url, {
@@ -32,11 +32,23 @@ export const saveProject = (id: number, state: MapState) =>
     method: "PUT",
     body: JSON.stringify({ state, note: "" }),
   });
-export const validateProject = (id: number, state: MapState): Promise<ValidationResult> =>
+export const validateProject = (
+  id: number,
+  state: MapState,
+  keepGeometry = false,
+  geometricPath?: Array<Point & { orientation: number }> | null,
+): Promise<ValidationResult> =>
   jsonFetch(`/api/projects/${id}/validate`, {
     method: "POST",
-    body: JSON.stringify({ state }),
+    body: JSON.stringify({
+      state,
+      keep_geometry: keepGeometry,
+      geometric_path: keepGeometry ? geometricPath ?? null : null,
+    }),
   });
+
+export const replayPlan = (planId: number) =>
+  jsonFetch(`/api/plans/${planId}/replay`, { method: "POST" });
 export const listVersions = (id: number): Promise<Version[]> =>
   jsonFetch(`/api/projects/${id}/versions`);
 export const saveVersion = (id: number, name: string, state: MapState) =>

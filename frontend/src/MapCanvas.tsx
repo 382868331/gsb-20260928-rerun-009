@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { ForbiddenZone, MapState, Point, Project, ValidationResult } from "./types";
 
-type Mode = "zone" | "start" | "end";
+type Mode = "zone" | "timed" | "waiting" | "checkpoint" | "start" | "end";
 
 type Props = {
   project: Project;
@@ -35,13 +35,13 @@ export function MapCanvas({ project, state, scale, result, onChange }: Props) {
 
   const pathPoints = result?.path ?? [];
   const pathD = pathPoints
-    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
+    .map((point, index) => (index === 0 ? "M" : "L") + " " + point.x + " " + point.y)
     .join(" ");
 
   function svgPoint(event: React.MouseEvent<SVGSVGElement>): Point {
     const svg = event.currentTarget;
     const box = svg.getBoundingClientRect();
-    const x = origin.x + ((event.clientX - box.left) / scale);
+    const x = origin.x + (event.clientX - box.left) / scale;
     const y = origin.y + mapHeight - (event.clientY - box.top) / scale;
     return { x: Number(x.toFixed(4)), y: Number(y.toFixed(4)) };
   }
@@ -55,6 +55,26 @@ export function MapCanvas({ project, state, scale, result, onChange }: Props) {
     );
   }
 
+  function addRect(nextMode: "zone" | "timed" | "waiting", point: Point) {
+    const x = Math.min(draftPoint!.x, point.x);
+    const y = Math.min(draftPoint!.y, point.y);
+    const width = Math.abs(point.x - draftPoint!.x);
+    const height = Math.abs(point.y - draftPoint!.y);
+    setDraftPoint(null);
+    if (width < project.resolution || height < project.resolution) return;
+    const base = { id: crypto.randomUUID(), x, y, width, height };
+    if (nextMode === "timed") {
+      onChange({
+        ...state,
+        timed_zones: [...state.timed_zones, { ...base, close_start: 0, close_end: 30 }],
+      });
+    } else if (nextMode === "waiting") {
+      onChange({ ...state, waiting_zones: [...state.waiting_zones, base] });
+    } else {
+      onChange({ ...state, forbidden_zones: [...state.forbidden_zones, base] });
+    }
+  }
+
   function handleClick(event: React.MouseEvent<SVGSVGElement>) {
     const point = svgPoint(event);
     if (!insideMap(point)) return;
@@ -66,33 +86,46 @@ export function MapCanvas({ project, state, scale, result, onChange }: Props) {
       onChange({ ...state, end: point });
       return;
     }
+    if (mode === "checkpoint") {
+      onChange({
+        ...state,
+        checkpoints: [
+          ...state.checkpoints,
+          {
+            id: crypto.randomUUID(),
+            order: state.checkpoints.length,
+            x: point.x,
+            y: point.y,
+            orientation: 0,
+            window_start: 0,
+            window_end: 60,
+            tolerance: null,
+            orientation_tolerance: null,
+          },
+        ],
+      });
+      return;
+    }
     if (!draftPoint) {
       setDraftPoint(point);
       return;
     }
-    const x = Math.min(draftPoint.x, point.x);
-    const y = Math.min(draftPoint.y, point.y);
-    const zone: ForbiddenZone = {
-      id: crypto.randomUUID(),
-      x,
-      y,
-      width: Math.abs(point.x - draftPoint.x),
-      height: Math.abs(point.y - draftPoint.y),
-    };
-    setDraftPoint(null);
-    if (zone.width >= project.resolution && zone.height >= project.resolution) {
-      onChange({ ...state, forbidden_zones: [...state.forbidden_zones, zone] });
-    }
+    addRect(mode, point);
   }
+
+  const tools: Array<[Mode, string]> = [
+    ["zone", "永久禁行区"],
+    ["timed", "限时封闭区"],
+    ["waiting", "安全等待区"],
+    ["checkpoint", "检查点"],
+    ["start", "起点"],
+    ["end", "终点"],
+  ];
 
   return (
     <div className="canvas-panel">
       <div className="tools">
-        {([
-          ["zone", "禁行区"],
-          ["start", "起点"],
-          ["end", "终点"],
-        ] as Array<[Mode, string]>).map(([value, label]) => (
+        {tools.map(([value, label]) => (
           <button
             key={value}
             className={mode === value ? "active" : ""}
@@ -104,7 +137,7 @@ export function MapCanvas({ project, state, scale, result, onChange }: Props) {
             {label}
           </button>
         ))}
-        <span>点击设置；禁行区点击两个对角点</span>
+        <span>点击设置；矩形工具点击两个对角点</span>
       </div>
       <svg
         width={mapWidth * scale}
@@ -112,63 +145,34 @@ export function MapCanvas({ project, state, scale, result, onChange }: Props) {
         className="map-svg"
         onClick={handleClick}
       >
-        <g transform={`translate(0 ${mapHeight * scale}) scale(${scale} ${-scale})`}>
-          <rect
-            x={origin.x}
-            y={origin.y}
-            width={mapWidth}
-            height={mapHeight}
-            fill="#f8fafc"
-            stroke="#0f172a"
-          />
+        <g transform={"translate(0 " + mapHeight * scale + ") scale(" + scale + " " + -scale + ")"}>
+          <rect x={origin.x} y={origin.y} width={mapWidth} height={mapHeight} fill="#f8fafc" stroke="#0f172a" />
           {wallRects.map((rect, index) => (
-            <rect
-              key={index}
-              x={rect.x}
-              y={rect.y}
-              width={project.resolution}
-              height={project.resolution}
-              fill="#334155"
-            />
+            <rect key={index} x={rect.x} y={rect.y} width={project.resolution} height={project.resolution} fill="#334155" />
           ))}
           {state.forbidden_zones.map((zone) => (
-            <rect
-              key={zone.id}
-              x={zone.x}
-              y={zone.y}
-              width={zone.width}
-              height={zone.height}
-              fill="rgba(239,68,68,0.35)"
-              stroke="#dc2626"
-              strokeWidth={2 / scale}
-            />
+            <rect key={zone.id} x={zone.x} y={zone.y} width={zone.width} height={zone.height}
+              fill="rgba(239,68,68,0.35)" stroke="#dc2626" strokeWidth={2 / scale} />
+          ))}
+          {state.timed_zones.map((zone) => (
+            <rect key={zone.id} x={zone.x} y={zone.y} width={zone.width} height={zone.height}
+              fill="rgba(245,158,11,0.30)" stroke="#d97706"
+              strokeDasharray="0.18 0.12" strokeWidth={2 / scale} />
+          ))}
+          {state.waiting_zones.map((zone) => (
+            <rect key={zone.id} x={zone.x} y={zone.y} width={zone.width} height={zone.height}
+              fill="rgba(34,197,94,0.22)" stroke="#16a34a"
+              strokeDasharray="0.1 0.08" strokeWidth={2 / scale} />
           ))}
           {result?.passable && (
             <path d={pathD} fill="none" stroke="#16a34a" strokeWidth={0.08} />
           )}
-          {state.start && (
-            <circle cx={state.start.x} cy={state.start.y} r={0.18} fill="#2563eb" />
-          )}
-          {state.end && (
-            <circle cx={state.end.x} cy={state.end.y} r={0.18} fill="#9333ea" />
-          )}
+          {state.checkpoints.map((cp) => (
+            <circle key={cp.id} cx={cp.x} cy={cp.y} r={0.16} fill="#0ea5e9" stroke="#0c4a6e" strokeWidth={0.02} />
+          ))}
+          {state.start && <circle cx={state.start.x} cy={state.start.y} r={0.18} fill="#2563eb" />}
+          {state.end && <circle cx={state.end.x} cy={state.end.y} r={0.18} fill="#9333ea" />}
           {draftPoint && <circle cx={draftPoint.x} cy={draftPoint.y} r={0.12} fill="#ea580c" />}
-          <line
-            x1={origin.x}
-            y1={origin.y}
-            x2={origin.x + 0.8}
-            y2={origin.y}
-            stroke="#0f172a"
-            strokeWidth={0.04}
-          />
-          <line
-            x1={origin.x}
-            y1={origin.y}
-            x2={origin.x}
-            y2={origin.y + 0.8}
-            stroke="#0f172a"
-            strokeWidth={0.04}
-          />
         </g>
       </svg>
     </div>

@@ -182,9 +182,12 @@ async def validate_project(project_id: int, payload: PassageRequestModel) -> dic
             end_orientation=state["end_orientation"],
             checkpoints=state["checkpoints"],
             waiting_zones=state["waiting_zones"],
+            timed_zones=state.get("timed_zones", []),
             linear_speed=state["linear_speed"],
             angular_speed=state["angular_speed"],
             start_time=state["start_time"],
+            keep_geometry=payload.keep_geometry,
+            geometric_path=payload.geometric_path,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -196,12 +199,64 @@ async def validate_project(project_id: int, payload: PassageRequestModel) -> dic
             "status": result.get("status"),
             "schedule": result.get("schedule", []),
             "plans": result.get("plans", []),
+            "segments": result.get("segments", []),
+            "replay": result.get("replay", {}),
+            "status": result.get("status"),
             "algorithm": result.get("algorithm"),
             "map_updated_at": row["updated_at"],
         },
         state,
     )
     return result
+
+
+@app.post("/api/plans/{plan_id}/replay")
+async def replay_plan(plan_id: int) -> dict[str, Any]:
+    """重开保存方案后，用保存时的地图/状态逐段重放，结论必须一致。"""
+
+    record = store.get_plan(plan_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="plan not found")
+    saved_result = json.loads(record["result"])
+    state = json.loads(record["state"])
+    project_id = record["project_id"]
+    row = store.get_project(project_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    grid = json.loads(row["map_data"])["grid"]
+    try:
+        fresh = validate_passage(
+            grid,
+            state["forbidden_zones"],
+            row["resolution"],
+            state["robot_width"],
+            state["robot_length"],
+            state["origin"],
+            state["start"],
+            state["end"],
+            start_orientation=state["start_orientation"],
+            end_orientation=state["end_orientation"],
+            checkpoints=state["checkpoints"],
+            waiting_zones=state["waiting_zones"],
+            timed_zones=state.get("timed_zones", []),
+            linear_speed=state["linear_speed"],
+            angular_speed=state["angular_speed"],
+            start_time=state["start_time"],
+            keep_geometry=bool(saved_result.get("stage") == "retain_geometry"),
+            geometric_path=saved_result.get("path"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    consistent = fresh.get("status") == saved_result.get("status")
+    return {
+        "consistent": consistent and bool(fresh.get("replay", {}).get("ok", True)),
+        "saved_status": saved_result.get("status"),
+        "fresh_status": fresh.get("status"),
+        "saved_segments": saved_result.get("segments", []),
+        "fresh_segments": fresh.get("segments", []),
+        "replay": fresh.get("replay", {}),
+        "algorithm": fresh.get("algorithm"),
+    }
 
 
 @app.get("/api/projects/{project_id}/plans")

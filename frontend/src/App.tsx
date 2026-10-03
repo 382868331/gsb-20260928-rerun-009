@@ -3,6 +3,7 @@ import {
   createProject,
   getProject,
   listVersions,
+  replayPlan,
   restoreVersion,
   saveProject,
   saveVersion,
@@ -14,6 +15,26 @@ import type { MapState, Project, ValidationResult, Version } from "./types";
 const STORAGE_KEY = "robot-map-editor-draft";
 
 type EditHistory = { past: MapState[]; future: MapState[] };
+
+function segmentLabel(segment: import("./types").Segment): string {
+  const when =
+    segment.time !== undefined
+      ? "t=" + segment.time.toFixed(2) + "s"
+      : (segment.start ?? 0).toFixed(2) + "→" + (segment.end ?? 0).toFixed(2) + "s";
+  const labels: Record<string, string> = {
+    start: "起点就位",
+    arrive: "直行到达",
+    wait_depart_arrive: "等待后出发到达",
+    turn: "原地转向",
+    wait: "安全位等待",
+    checkpoint: "通过检查点",
+  };
+  let detail = labels[segment.type] ?? segment.type;
+  if (segment.type === "checkpoint") {
+    detail += " #" + segment.order + "（窗口 " + segment.window_start + "–" + segment.window_end + "s）";
+  }
+  return detail + " @ " + when;
+}
 
 export default function App() {
   const [project, setProject] = useState<Project | null>(null);
@@ -28,6 +49,7 @@ export default function App() {
   const [result, setResult] = useState<ValidationResult | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [keepGeometry, setKeepGeometry] = useState(false);
 
   const projectId = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
@@ -117,12 +139,42 @@ export default function App() {
     setBusy(true);
     try {
       await persist();
-      setResult(await validateProject(project.id, state));
-      setMessage("验证基于服务器保存的栅格和当前米制参数，不受页面缩放影响。");
+      const validation = await validateProject(
+        project.id,
+        state,
+        keepGeometry,
+        result?.path ?? null
+      );
+      setResult(validation);
+      setMessage(
+        validation.replay?.ok
+          ? "逐段重放通过：到达、转向、等待与检查点事件均与封路/窗口语义一致。"
+          : "验证基于服务器保存的栅格和当前米制参数，不受页面缩放影响。"
+      );
     } catch (error) {
       setMessage((error as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function handleReplay() {
+    if (!project) return;
+    try {
+      const response = await fetch("/api/projects/" + project.id + "/plans");
+      const plans = await response.json();
+      if (!plans.length) {
+        setMessage("还没有已保存的核对方案，请先执行一次检查。");
+        return;
+      }
+      const replay = await replayPlan(plans[0].id);
+      setMessage(
+        replay.consistent
+          ? "重开保存方案后逐段重放，结论与保存时一致。"
+          : "保存方案重放结论与当前地图不一致，地图或封路时段已变化。"
+      );
+    } catch (error) {
+      setMessage((error as Error).message);
     }
   }
 
@@ -145,6 +197,26 @@ export default function App() {
   function removeZone(id: string) {
     if (!state) return;
     setState({ ...state, forbidden_zones: state.forbidden_zones.filter((zone) => zone.id !== id) });
+  }
+
+  function updateTimedZone(id: string, patchValue: Partial<MapState["timed_zones"][number]>) {
+    if (!state) return;
+    setState({
+      ...state,
+      timed_zones: state.timed_zones.map((zone) =>
+        zone.id === id ? { ...zone, ...patchValue } : zone
+      ),
+    });
+  }
+
+  function updateCheckpoint(id: string, patchValue: Partial<MapState["checkpoints"][number]>) {
+    if (!state) return;
+    setState({
+      ...state,
+      checkpoints: state.checkpoints.map((cp) =>
+        cp.id === id ? { ...cp, ...patchValue } : cp
+      ),
+    });
   }
 
   return (
@@ -225,12 +297,159 @@ export default function App() {
               ))}
             </section>
             <section>
+              <h2>限时封闭区</h2>
+              {state.timed_zones.length === 0 && (
+                <p className="hint">橙色虚线区域在 [封闭开始, 封闭结束) 内禁止进入；开始时刻须已撤离，结束时刻起可进入。</p>
+              )}
+              {state.timed_zones.map((zone) => (
+                <div key={zone.id} className="zone-row timed-row">
+                  <label>
+                    封闭开始 s
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={zone.close_start}
+                      onChange={(event) =>
+                        updateTimedZone(zone.id, { close_start: Number(event.target.value) })
+                      }
+                    />
+                  </label>
+                  <label>
+                    开放时刻 s
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={zone.close_end}
+                      onChange={(event) =>
+                        updateTimedZone(zone.id, { close_end: Number(event.target.value) })
+                      }
+                    />
+                  </label>
+                  <button
+                    onClick={() =>
+                      setState({
+                        ...state,
+                        timed_zones: state.timed_zones.filter((item) => item.id !== zone.id),
+                      })
+                    }
+                  >
+                    删除
+                  </button>
+                </div>
+              ))}
+            </section>
+            <section>
+              <h2>检查点</h2>
+              {state.checkpoints.length === 0 && (
+                <p className="hint">在画布上点选检查点；容差留空时保存与核对使用同一缺省值（1.5 格）。</p>
+              )}
+              {state.checkpoints.map((cp) => (
+                <div key={cp.id} className="zone-row timed-row">
+                  <span>
+                    #{cp.order} ({cp.x.toFixed(2)}, {cp.y.toFixed(2)})
+                  </span>
+                  <label>
+                    窗口起 s
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={cp.window_start}
+                      onChange={(event) =>
+                        updateCheckpoint(cp.id, { window_start: Number(event.target.value) })
+                      }
+                    />
+                  </label>
+                  <label>
+                    窗口止 s
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={cp.window_end}
+                      onChange={(event) =>
+                        updateCheckpoint(cp.id, { window_end: Number(event.target.value) })
+                      }
+                    />
+                  </label>
+                  <label>
+                    容差 m（可空）
+                    <input
+                      type="number"
+                      step="0.05"
+                      min="0"
+                      value={cp.tolerance ?? ""}
+                      placeholder="缺省"
+                      onChange={(event) =>
+                        updateCheckpoint(cp.id, {
+                          tolerance: event.target.value === "" ? null : Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                  <button
+                    onClick={() =>
+                      setState({
+                        ...state,
+                        checkpoints: state.checkpoints
+                          .filter((item) => item.id !== cp.id)
+                          .map((item, index) => ({ ...item, order: index })),
+                      })
+                    }
+                  >
+                    删除
+                  </button>
+                </div>
+              ))}
+            </section>
+            <section>
               <h2>通过性</h2>
+              <label className="inline-check">
+                <input
+                  type="checkbox"
+                  checked={keepGeometry}
+                  onChange={(event) => setKeepGeometry(event.target.checked)}
+                />
+                先保留原几何路线重排时间，再比较重新选路
+              </label>
               <button disabled={busy} onClick={handleValidate}>检查起点到终点</button>
+              <button onClick={handleReplay}>重放最近保存方案</button>
               {result && (
                 <div className={result.passable ? "pass" : "fail"}>
                   <strong>{result.passable ? "可以通过" : "不能通过"}</strong>
                   <p>{result.reason}</p>
+                  {result.retain_geometry && (
+                    <p className="hint">
+                      原几何路线：{result.retain_geometry.status}
+                      {result.retain_geometry.arrival_time !== undefined
+                        ? "（到达 " + result.retain_geometry.arrival_time.toFixed(2) + " s）"
+                        : ""}
+                      。{result.retain_geometry.reason}
+                    </p>
+                  )}
+                  {result.search_completed === false && (
+                    <p className="hint">搜索预算已耗尽：可行性尚未证明，与“不可通过”含义不同。</p>
+                  )}
+                  {result.segments && result.segments.length > 0 && (
+                    <details>
+                      <summary>逐段过程（{result.segments.length} 段）</summary>
+                      <ol className="segments">
+                        {result.segments.map((segment, index) => (
+                          <li key={index}>
+                            {segmentLabel(segment)}
+                          </li>
+                        ))}
+                      </ol>
+                    </details>
+                  )}
+                  {result.replay && (
+                    <small>
+                      重放校验：{result.replay.ok ? "全部通过" : "存在矛盾"}
+                      {result.replay.missing_checkpoints.length > 0
+                        ? "；缺检查点 " + result.replay.missing_checkpoints.join(", ")
+                        : ""}
+                    </small>
+                  )}
                   <small>算法版本：{result.algorithm}</small>
                 </div>
               )}

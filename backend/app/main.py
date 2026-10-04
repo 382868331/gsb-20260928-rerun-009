@@ -232,20 +232,26 @@ async def validate_project(project_id: int, payload: PassageRequestModel) -> dic
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     result["map_version"] = row["updated_at"]
     result["state_snapshot"] = state
-    store.save_plan(
-        project_id,
-        {
-            "status": result.get("status"),
-            "schedule": result.get("schedule", []),
-            "plans": result.get("plans", []),
-            "segments": result.get("segments", []),
-            "replay": result.get("replay", {}),
-            "algorithm": result.get("algorithm"),
-            "map_updated_at": row["updated_at"],
-        },
-        state,
-    )
+    saved_report = dict(result)
+    saved_report["map_updated_at"] = row["updated_at"]
+    saved_report["robot_params"] = {
+        "robot_width": state["robot_width"],
+        "robot_length": state["robot_length"],
+        "linear_speed": state["linear_speed"],
+        "angular_speed": state["angular_speed"],
+    }
+    store.save_plan(project_id, saved_report, state)
     return result
+
+
+REQUIRED_PLAN_FIELDS = (
+    "passable",
+    "status",
+    "reason",
+    "path",
+    "search_completed",
+    "map_updated_at",
+)
 
 
 @app.post("/api/plans/{plan_id}/replay")
@@ -285,12 +291,33 @@ async def replay_plan(plan_id: int) -> dict[str, Any]:
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    consistent = fresh.get("status") == saved_result.get("status")
+    missing_fields = [key for key in REQUIRED_PLAN_FIELDS if key not in saved_result]
+    record_complete = not missing_fields
+    saved_map_revision = saved_result.get("map_updated_at")
+    map_changed = saved_map_revision is not None and saved_map_revision != row["updated_at"]
+    consistent = (
+        record_complete
+        and not map_changed
+        and fresh.get("status") == saved_result.get("status")
+        and fresh.get("reason") == saved_result.get("reason")
+        and bool(fresh.get("replay", {}).get("ok", True))
+    )
     return {
-        "consistent": consistent and bool(fresh.get("replay", {}).get("ok", True)),
+        "consistent": consistent,
+        "record_complete": record_complete,
+        "missing_fields": missing_fields,
+        "map_changed": map_changed,
+        "saved_map_revision": saved_map_revision,
+        "current_map_revision": row["updated_at"],
+        "saved_passable": saved_result.get("passable"),
         "saved_status": saved_result.get("status"),
-        "fresh_status": fresh.get("status"),
+        "saved_reason": saved_result.get("reason"),
+        "saved_search_completed": saved_result.get("search_completed"),
+        "saved_path": saved_result.get("path", []),
         "saved_segments": saved_result.get("segments", []),
+        "saved_robot_params": saved_result.get("robot_params"),
+        "fresh_status": fresh.get("status"),
+        "fresh_reason": fresh.get("reason"),
         "fresh_segments": fresh.get("segments", []),
         "replay": fresh.get("replay", {}),
         "algorithm": fresh.get("algorithm"),
@@ -299,6 +326,18 @@ async def replay_plan(plan_id: int) -> dict[str, Any]:
 
 @app.get("/api/projects/{project_id}/plans")
 async def list_plans(project_id: int) -> list[dict[str, Any]]:
-    if store.get_project(project_id) is None:
+    row = store.get_project(project_id)
+    if row is None:
         raise HTTPException(status_code=404, detail="project not found")
-    return [dict(row) for row in store.list_plans(project_id)]
+    plans = []
+    for plan in store.list_plans(project_id):
+        result = plan["result"]
+        saved_revision = result.get("map_updated_at")
+        plan["map_changed"] = (
+            saved_revision is not None and saved_revision != row["updated_at"]
+        )
+        plan["record_complete"] = all(
+            key in result for key in REQUIRED_PLAN_FIELDS
+        )
+        plans.append(plan)
+    return plans

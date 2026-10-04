@@ -1,4 +1,12 @@
-import type { MapState, Point, Project, ValidationResult, Version } from "./types";
+import type {
+  MapState,
+  PlanReplay,
+  Point,
+  Project,
+  SavedPlan,
+  ValidationResult,
+  Version,
+} from "./types";
 
 async function jsonFetch(url: string, init?: RequestInit): Promise<any> {
   const response = await fetch(url, {
@@ -47,7 +55,11 @@ export const validateProject = (
     }),
   });
 
-export const replayPlan = (planId: number) =>
+export const listPlans = (id: number): Promise<SavedPlan[]> =>
+  jsonFetch(`/api/projects/${id}/plans`);
+export const getPlan = (planId: number): Promise<SavedPlan> =>
+  jsonFetch(`/api/plans/${planId}`);
+export const replayPlan = (planId: number): Promise<PlanReplay> =>
   jsonFetch(`/api/plans/${planId}/replay`, { method: "POST" });
 export const listVersions = (id: number): Promise<Version[]> =>
   jsonFetch(`/api/projects/${id}/versions`);

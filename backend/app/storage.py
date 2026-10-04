@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -46,11 +47,29 @@ class Store:
                     project_id INTEGER NOT NULL,
                     result TEXT NOT NULL,
                     state TEXT NOT NULL,
+                    map_grid TEXT,
+                    map_resolution REAL,
+                    map_version TEXT,
+                    map_fingerprint TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES projects(id)
                 );
                 """
             )
+            self._migrate_plans(conn)
+
+    def _migrate_plans(self, conn: sqlite3.Connection) -> None:
+        """老库可能缺少地图快照列；按需补齐，缺列绝不被解释成新结论。"""
+
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(plans)")}
+        for column, declaration in (
+            ("map_grid", "TEXT"),
+            ("map_resolution", "REAL"),
+            ("map_version", "TEXT"),
+            ("map_fingerprint", "TEXT"),
+        ):
+            if column not in existing:
+                conn.execute(f"ALTER TABLE plans ADD COLUMN {column} {declaration}")
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -143,29 +162,48 @@ class Store:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM versions WHERE id = ?", (version_id,)).fetchone()
 
-    def save_plan(self, project_id: int, result: dict[str, Any], state: dict[str, Any]) -> int:
+    def save_plan(
+        self,
+        project_id: int,
+        result: dict[str, Any],
+        state: dict[str, Any],
+        map_grid: list[list[bool]] | None = None,
+        map_resolution: float | None = None,
+        map_version: str | None = None,
+        map_checksum: str | None = None,
+    ) -> int:
         with self.connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO plans (project_id, result, state, created_at) VALUES (?, ?, ?, ?)",
-                (project_id, json.dumps(result), json.dumps(state), utc_now()),
+                """
+                INSERT INTO plans
+                (project_id, result, state, map_grid, map_resolution,
+                 map_version, map_fingerprint, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    json.dumps(result, ensure_ascii=False),
+                    json.dumps(state, ensure_ascii=False),
+                    None if map_grid is None else json.dumps(map_grid),
+                    map_resolution,
+                    map_version,
+                    map_checksum,
+                    utc_now(),
+                ),
             )
             return int(cursor.lastrowid)
 
     def list_plans(self, project_id: int) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT id, result, state, created_at FROM plans WHERE project_id = ? ORDER BY id DESC LIMIT 20",
+                """
+                SELECT id, result, state, map_grid, map_resolution,
+                       map_version, map_fingerprint, created_at
+                FROM plans WHERE project_id = ? ORDER BY id DESC LIMIT 20
+                """,
                 (project_id,),
             ).fetchall()
-        return [
-                {
-                    "id": row["id"],
-                    "created_at": row["created_at"],
-                    "result": json.loads(row["result"]),
-                    "state": json.loads(row["state"]),
-                }
-            for row in rows
-        ]
+        return rows
 
     def get_plan(self, plan_id: int) -> sqlite3.Row | None:
         with self.connect() as conn:
@@ -182,3 +220,21 @@ class Store:
                 (version["state"], utc_now(), version["project_id"]),
             )
         return state
+
+
+def map_fingerprint(grid: list[list[bool]], resolution: float, state: dict[str, Any]) -> str:
+    """结论所依据的地图修订与机器人参数指纹。"""
+
+    payload = {
+        "grid": grid,
+        "resolution": resolution,
+        "robot_width": state.get("robot_width"),
+        "robot_length": state.get("robot_length"),
+        "origin": state.get("origin"),
+        "forbidden_zones": state.get("forbidden_zones", []),
+        "timed_zones": state.get("timed_zones", []),
+        "waiting_zones": state.get("waiting_zones", []),
+        "checkpoints": state.get("checkpoints", []),
+    }
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

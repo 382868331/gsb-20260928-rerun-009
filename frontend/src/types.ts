@@ -83,11 +83,11 @@ export type Replay = {
 };
 
 export type ValidationResult = {
-  passable: boolean;
+  passable?: boolean;
   status: string;
-  reason: string;
-  algorithm: string;
-  path: Array<Point & { orientation: number }>;
+  reason?: string;
+  algorithm?: string;
+  path?: Array<Point & { orientation: number }>;
   schedule?: Array<Record<string, unknown>>;
   segments?: Segment[];
   replay?: Replay;
@@ -95,4 +95,52 @@ export type ValidationResult = {
   retain_basis?: Record<string, unknown> | null;
   retain_geometry?: { status: string; reason: string; arrival_time?: number };
   search_completed?: boolean;
+  map_version?: string;
+  map_fingerprint?: string;
+  robot_params?: Record<string, number | null>;
+  state_snapshot?: MapState;
+  plans?: Array<Record<string, unknown>>;
+};
+
+export type SavedPlan = {
+  id: number;
+  created_at: string;
+  result: ValidationResult;
+  state: MapState;
+  result_complete: boolean;
+  missing_fields: string[];
+  map_changed: boolean;
+  map_snapshot_missing: boolean;
+  map_version: string | null;
+  current_map_version?: string;
+  map_fingerprint?: string | null;
+  current_map_fingerprint?: string | null;
+};
+
+export type PlanReplay = {
+  consistent: boolean;
+  saved_status?: string;
+  fresh_status: string;
+  saved_passable?: boolean;
+  fresh_passable?: boolean;
+  saved_reason?: string;
+  fresh_reason?: string;
+  saved_search_completed?: boolean;
+  fresh_search_completed?: boolean;
+  saved_segments: Segment[];
+  fresh_segments: Segment[];
+  saved_path?: Array<Point & { orientation: number }>;
+  fresh_path?: Array<Point & { orientation: number }>;
+  saved_schedule?: Array<Record<string, unknown>>;
+  fresh_schedule?: Array<Record<string, unknown>>;
+  replay: Replay;
+  algorithm?: string;
+  saved_algorithm?: string;
+  result_complete: boolean;
+  missing_fields: string[];
+  map_changed: boolean;
+  map_snapshot_missing: boolean;
+  saved_map_version?: string | null;
+  current_map_version?: string;
+  robot_params?: Record<string, number>;
 };

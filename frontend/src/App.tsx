@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   createProject,
   getProject,
+  listPlans,
   listVersions,
   replayPlan,
   restoreVersion,
@@ -10,7 +11,14 @@ import {
   validateProject,
 } from "./api";
 import { MapCanvas } from "./MapCanvas";
-import type { MapState, Project, ValidationResult, Version } from "./types";
+import type {
+  MapState,
+  PlanReplay,
+  Project,
+  SavedPlan,
+  ValidationResult,
+  Version,
+} from "./types";
 
 const STORAGE_KEY = "robot-map-editor-draft";
 
@@ -44,6 +52,51 @@ function legacyNotice(defaults: string[] | undefined): string {
     defaults.join("、") +
     "），已按默认值补齐；检查点与封路尚未验证，请重新检查后再保存。"
   );
+}
+
+function replayNotice(replay: PlanReplay): string {
+  if (!replay.result_complete) {
+    return (
+      "这是旧版保存的报告，缺少字段：" +
+      replay.missing_fields.join("、") +
+      "；缺失字段不会被当成新的通过或失败，请重新执行检查。"
+    );
+  }
+  if (replay.map_changed) {
+    return (
+      "该报告基于旧地图修订（"
+      + (replay.saved_map_version ?? "未知修订")
+      + "），与当前地图（"
+      + (replay.current_map_version ?? "未知修订")
+      + "）不同；以下原理由仅在保存时快照上重放："
+      + (replay.saved_reason ?? "（无）")
+      + "。"
+    );
+  }
+  if (replay.map_snapshot_missing) {
+    return "旧报告没有保存地图快照，无法确认地图是否变化；已按保存时的状态参数重放。";
+  }
+  return replay.consistent
+    ? "重开保存方案后用保存时的地图与参数逐段重放，结论、理由与保存时一致。"
+    : "保存方案重放结论与保存时不一致，结果可能来自不同算法版本，请重新检查。";
+}
+
+function savedPlanNotice(plan: SavedPlan | null): string {
+  if (!plan) return "";
+  if (!plan.result_complete) {
+    return (
+      "旧版报告字段不完整（缺少：" +
+      plan.missing_fields.join("、") +
+      "），不能据此判断通过或失败，请重新执行检查。"
+    );
+  }
+  if (plan.map_changed) {
+    return "地图已变化：以下为旧报告，结论仅对保存时的地图修订与机器人参数有效。";
+  }
+  if (plan.map_snapshot_missing) {
+    return "该旧报告缺少地图快照，无法核验地图是否变化。";
+  }
+  return "已从保存记录恢复报告：结论、理由、路线与逐段时序均为保存时结果。";
 }
 
 function segmentLabel(segment: import("./types").Segment): string {
@@ -80,6 +133,7 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [keepGeometry, setKeepGeometry] = useState(false);
+  const [savedPlan, setSavedPlan] = useState<SavedPlan | null>(null);
 
   const projectId = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
@@ -108,6 +162,14 @@ export default function App() {
       setStateDirect(initial);
       setResolution(loaded.resolution);
       listVersions(loaded.id).then(setVersions);
+      listPlans(loaded.id)
+        .then((plans) => {
+          if (plans.length > 0) {
+            setSavedPlan(plans[0]);
+            setResult(plans[0].result);
+          }
+        })
+        .catch(() => undefined);
       if (notice) setMessage(notice);
     }).catch((error) => setMessage(error.message));
   }, [projectId]);
@@ -164,6 +226,7 @@ export default function App() {
       setStateDirect(normalizeState(created.state));
       setHistory({ past: [], future: [] });
       setResult(null);
+      setSavedPlan(null);
       setVersions(await listVersions(created.id));
       setMessage("原图已单独保存，后续修订不会覆盖原图。");
     } catch (error) {
@@ -192,6 +255,8 @@ export default function App() {
         result?.path ?? null
       );
       setResult(validation);
+      const plans = await listPlans(project.id);
+      setSavedPlan(plans.length > 0 ? plans[0] : null);
       setMessage(
         validation.replay?.ok
           ? "逐段重放通过：到达、转向、等待与检查点事件均与封路/窗口语义一致。"
@@ -207,17 +272,17 @@ export default function App() {
   async function handleReplay() {
     if (!project) return;
     try {
-      const response = await fetch("/api/projects/" + project.id + "/plans");
-      const plans = await response.json();
+      const plans = await listPlans(project.id);
       if (!plans.length) {
         setMessage("还没有已保存的核对方案，请先执行一次检查。");
         return;
       }
+      const plan = plans[0];
       const replay = await replayPlan(plans[0].id);
+      setSavedPlan(plan);
+      setResult(plan.result);
       setMessage(
-        replay.consistent
-          ? "重开保存方案后逐段重放，结论与保存时一致。"
-          : "保存方案重放结论与当前地图不一致，地图或封路时段已变化。"
+        replayNotice(replay)
       );
     } catch (error) {
       setMessage((error as Error).message);
@@ -461,10 +526,25 @@ export default function App() {
               </label>
               <button disabled={busy} onClick={handleValidate}>检查起点到终点</button>
               <button onClick={handleReplay}>重放最近保存方案</button>
+              {savedPlan && result && (
+                <p className={savedPlan.map_changed || !savedPlan.result_complete ? "hint warn" : "hint"}>
+                  {savedPlanNotice(savedPlan)}
+                  {savedPlan.map_version ? "（报告地图修订：" + savedPlan.map_version + "）" : ""}
+                </p>
+              )}
               {result && (
-                <div className={result.passable ? "pass" : "fail"}>
-                  <strong>{result.passable ? "可以通过" : "不能通过"}</strong>
-                  <p>{result.reason}</p>
+                <div className={result.passable === true ? "pass" : result.passable === false ? "fail" : "unknown"}>
+                  <strong>
+                    {result.passable === true
+                      ? "可以通过"
+                      : result.passable === false
+                        ? "不能通过"
+                        : "结论字段缺失"}
+                  </strong>
+                  <p>{result.reason ?? "旧版保存记录未包含判断理由，无法恢复当时的结论。"}</p>
+                  {result.search_completed === false && (
+                    <p className="hint warn">搜索预算已耗尽（search_incomplete）：可行性尚未证明，既不是“可以通过”也不是“不能通过”。</p>
+                  )}
                   {result.retain_geometry && (
                     <p className="hint">
                       原几何路线：{result.retain_geometry.status}
@@ -473,9 +553,6 @@ export default function App() {
                         : ""}
                       。{result.retain_geometry.reason}
                     </p>
-                  )}
-                  {result.search_completed === false && (
-                    <p className="hint">搜索预算已耗尽：可行性尚未证明，与“不可通过”含义不同。</p>
                   )}
                   {result.segments && result.segments.length > 0 && (
                     <details>
@@ -497,7 +574,14 @@ export default function App() {
                         : ""}
                     </small>
                   )}
-                  <small>算法版本：{result.algorithm}</small>
+                  {result.map_version && <small>所依据地图修订：{result.map_version}</small>}
+                  {result.robot_params && (
+                    <small>
+                      机器人参数：宽 {String(result.robot_params.robot_width)} m × 长 {String(result.robot_params.robot_length)} m，
+                      线速度 {String(result.robot_params.linear_speed)} m/s，角速度 {String(result.robot_params.angular_speed)} rad/s
+                    </small>
+                  )}
+                  <small>算法版本：{result.algorithm ?? "未知（旧报告）"}</small>
                 </div>
               )}
             </section>

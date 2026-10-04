@@ -272,6 +272,8 @@ def validate_passage(
         "algorithm": ALGORITHM_VERSION,
         "path": [],
         "segments": [],
+        "schedule": [],
+        "plans": [],
         "angular_resolution": angular_resolution,
         "search_completed": True,
     }
@@ -1505,5 +1507,4 @@ def replay_segments(*, segments, specs, timed, move_cost, turn_cost):
         "checkpoint_times": checkpoint_hits,
         "segment_count": len(segments),
     }
-
 

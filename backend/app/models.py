@@ -88,3 +88,4 @@ class PassageRequestModel(BaseModel):
     state: MapStateModel
     keep_geometry: bool = False
     geometric_path: list[dict] | None = None
+    search_budget: int = Field(default=1_500_000, gt=0)

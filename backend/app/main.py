@@ -10,7 +10,14 @@ from fastapi.responses import Response
 
 from .geometry import validate_passage
 from .maps import image_to_grid, make_sample_map
-from .models import PassageRequestModel, ProjectUpdateModel, VersionCreateModel
+from .joint import plan_joint
+from .models import (
+    JointAdoptModel,
+    JointPlanRequestModel,
+    PassageRequestModel,
+    ProjectUpdateModel,
+    VersionCreateModel,
+)
 from .storage import Store, map_fingerprint
 
 
@@ -470,3 +477,168 @@ async def get_plan(plan_id: int) -> dict[str, Any]:
     if record is None:
         raise HTTPException(status_code=404, detail="plan not found")
     return load_plan_record(record, store.get_project(record["project_id"]))
+
+
+def _current_joint_fingerprint(row) -> tuple[dict[str, Any], list[list[bool]], str]:
+    state, _ = normalize_state(json.loads(row["state"]))
+    grid = json.loads(row["map_data"])["grid"]
+    return state, grid, map_fingerprint(grid, row["resolution"], state)
+
+
+@app.post("/api/projects/{project_id}/joint-plan")
+async def joint_plan(project_id: int, payload: JointPlanRequestModel) -> dict[str, Any]:
+    """为一组共享限时封闭区与检查点窗口的任务联合规划出发时刻。
+
+    候选只是建议：保存候选不修改任何任务与工程状态。
+    """
+
+    row = store.get_project(project_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    state, grid, fingerprint = _current_joint_fingerprint(row)
+    tasks = [task.model_dump() for task in payload.tasks]
+    try:
+        result = plan_joint(
+            grid=grid,
+            resolution=row["resolution"],
+            project_state=state,
+            tasks=tasks,
+            search_budget=payload.search_budget,
+            time_quantum=payload.time_quantum,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result["map_fingerprint"] = fingerprint
+    result["map_version"] = row["updated_at"]
+    commitments = {
+        task["id"]: task["committed_departure"] for task in tasks if task["committed"]
+    }
+    request_snapshot = {
+        "tasks": tasks,
+        "time_quantum": result["time_quantum"],
+        "search_budget": payload.search_budget,
+    }
+    for candidate in result["candidates"]:
+        candidate["candidate_id"] = store.save_joint_candidate(
+            project_id,
+            candidate["objective"],
+            request_snapshot,
+            candidate,
+            [task["id"] for task in tasks],
+            commitments,
+            fingerprint,
+        )
+    return result
+
+
+@app.get("/api/projects/{project_id}/joint-plans")
+async def list_joint_plans(project_id: int) -> list[dict[str, Any]]:
+    row = store.get_project(project_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    _, _, current_fingerprint = _current_joint_fingerprint(row)
+    records = []
+    for item in store.list_joint_candidates(project_id):
+        valid = item["map_fingerprint"] == current_fingerprint
+        records.append(
+            {
+                "id": item["id"],
+                "objective": item["objective"],
+                "created_at": item["created_at"],
+                "adopted_at": item["adopted_at"],
+                "result": json.loads(item["result"]),
+                "task_ids": json.loads(item["task_ids"]),
+                "commitments": json.loads(item["commitments"]),
+                "valid": valid,
+                "invalid_reason": None if valid else "map_changed",
+                "map_fingerprint": item["map_fingerprint"],
+                "current_map_fingerprint": current_fingerprint,
+            }
+        )
+    return records
+
+
+@app.post("/api/joint-plans/{candidate_id}/adopt")
+async def adopt_joint_candidate(
+    candidate_id: int, payload: JointAdoptModel
+) -> dict[str, Any]:
+    """采用候选前重新核对地图与承诺；采用本身不修改任何任务或工程状态。
+
+    地图/封闭区变化只使依赖该地图的候选失效；承诺变化只使记录了该承诺
+    任务的候选失效，其余候选不受影响。
+    """
+
+    record = store.get_joint_candidate(candidate_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="joint candidate not found")
+    row = store.get_project(record["project_id"])
+    if row is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    state, grid, current_fingerprint = _current_joint_fingerprint(row)
+    if record["map_fingerprint"] != current_fingerprint:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason": "map_changed",
+                "message": "地图或封闭区已变化，候选失效，请重新规划",
+                "saved_map_fingerprint": record["map_fingerprint"],
+                "current_map_fingerprint": current_fingerprint,
+            },
+        )
+    stored_commitments = json.loads(record["commitments"])
+    for task_id, departure in stored_commitments.items():
+        current = payload.commitments.get(task_id)
+        if current is None or abs(float(current) - float(departure)) > 1e-9:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "reason": "commitment_changed",
+                    "task_id": task_id,
+                    "expected": departure,
+                    "received": current,
+                    "message": f"已承诺任务 {task_id} 的出发时刻与候选保存时不一致",
+                },
+            )
+    request = json.loads(record["request"])
+    candidate = json.loads(record["result"])
+    recheck_tasks = []
+    for task in request["tasks"]:
+        fixed = dict(task)
+        departure = candidate["departures"][task["id"]]
+        fixed["committed"] = True
+        fixed["committed_departure"] = departure
+        fixed["earliest_departure"] = departure
+        fixed["latest_departure"] = departure
+        recheck_tasks.append(fixed)
+    try:
+        fresh = plan_joint(
+            grid=grid,
+            resolution=row["resolution"],
+            project_state=state,
+            tasks=recheck_tasks,
+            search_budget=int(request.get("search_budget", 200_000)),
+            time_quantum=request.get("time_quantum"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if fresh["status"] != "feasible":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason": "recheck_failed",
+                "status": fresh["status"],
+                "message": "采用前重算同一出发安排已不再可行：" + fresh["reason"],
+            },
+        )
+    store.mark_joint_adopted(candidate_id)
+    return {
+        "adopted": True,
+        "candidate_id": candidate_id,
+        "objective": record["objective"],
+        "candidate": candidate,
+        "recheck": {
+            "status": fresh["status"],
+            "search_completed": fresh["search_completed"],
+        },
+        "map_fingerprint": current_fingerprint,
+    }

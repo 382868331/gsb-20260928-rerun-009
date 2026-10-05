@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  adoptJointCandidate,
   createProject,
   getProject,
+  listJointPlans,
   listPlans,
   listVersions,
+  planJoint,
   replayPlan,
   restoreVersion,
   saveProject,
@@ -12,9 +15,11 @@ import {
 } from "./api";
 import { MapCanvas } from "./MapCanvas";
 import type {
+  JointPlanResult,
   MapState,
   PlanReplay,
   Project,
+  SavedJointCandidate,
   SavedPlan,
   ValidationResult,
   Version,
@@ -134,6 +139,12 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [keepGeometry, setKeepGeometry] = useState(false);
   const [savedPlan, setSavedPlan] = useState<SavedPlan | null>(null);
+  const [jointTasksText, setJointTasksText] = useState("");
+  const [jointQuantum, setJointQuantum] = useState("");
+  const [jointBudget, setJointBudget] = useState(200000);
+  const [jointResult, setJointResult] = useState<JointPlanResult | null>(null);
+  const [savedJoint, setSavedJoint] = useState<SavedJointCandidate[]>([]);
+
 
   const projectId = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
@@ -162,6 +173,7 @@ export default function App() {
       setStateDirect(initial);
       setResolution(loaded.resolution);
       listVersions(loaded.id).then(setVersions);
+      listJointPlans(loaded.id).then(setSavedJoint).catch(() => undefined);
       listPlans(loaded.id)
         .then((plans) => {
           if (plans.length > 0) {
@@ -304,6 +316,80 @@ export default function App() {
     setResult(null);
     const notice = legacyNotice(restored.state_defaults);
     setMessage(`已恢复：${version.name}` + (notice ? `。 ${notice}` : ""));
+  }
+
+  function defaultJointTasks(): string {
+    if (!state) return "[]";
+    return JSON.stringify(
+      [
+        {
+          id: "task-a",
+          start: state.start,
+          end: state.end,
+          earliest_departure: 0,
+          latest_departure: 30,
+          committed: false,
+          committed_departure: null,
+        },
+        {
+          id: "task-b",
+          start: state.end,
+          end: state.start,
+          earliest_departure: 0,
+          latest_departure: 30,
+          committed: false,
+          committed_departure: null,
+        },
+      ],
+      null,
+      2
+    );
+  }
+
+  async function refreshJointPlans(projectIdValue: number) {
+    try {
+      setSavedJoint(await listJointPlans(projectIdValue));
+    } catch {
+      setSavedJoint([]);
+    }
+  }
+
+  async function handleJointPlan() {
+    if (!project) return;
+    setBusy(true);
+    try {
+      await persist();
+      const tasks = JSON.parse(jointTasksText || defaultJointTasks());
+      const body: { tasks: unknown[]; time_quantum?: number; search_budget: number } = {
+        tasks,
+        search_budget: jointBudget,
+      };
+      if (jointQuantum.trim() !== "") body.time_quantum = Number(jointQuantum);
+      const planned = await planJoint(project.id, body);
+      setJointResult(planned);
+      await refreshJointPlans(project.id);
+      setMessage(
+        planned.status === "feasible"
+          ? "联合规划完成：候选不改变原任务，采用前会重新核对地图与承诺。"
+          : planned.reason
+      );
+    } catch (error) {
+      setMessage((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleAdoptJoint(candidateId: number, commitments: Record<string, number>) {
+    if (!project) return;
+    try {
+      await adoptJointCandidate(candidateId, commitments);
+      await refreshJointPlans(project.id);
+      setMessage("候选已采用：采用前已重新核对地图与承诺，原任务与工程状态未被修改。");
+    } catch (error) {
+      setMessage((error as Error).message);
+      await refreshJointPlans(project.id);
+    }
   }
 
   function removeZone(id: string) {
@@ -583,6 +669,114 @@ export default function App() {
                   )}
                   <small>算法版本：{result.algorithm ?? "未知（旧报告）"}</small>
                 </div>
+              )}
+            </section>
+            <section>
+              <h2>联合出发时刻规划</h2>
+              <p className="hint">
+                多条任务共享当前工程的限时封闭区与检查点窗口；只调整出发时刻，已承诺任务不可移动。
+                候选不改变原任务，采用前会重新核对地图与承诺。
+              </p>
+              <label>
+                任务（JSON 数组）
+                <textarea
+                  rows={8}
+                  value={jointTasksText || defaultJointTasks()}
+                  onChange={(event) => setJointTasksText(event.target.value)}
+                />
+              </label>
+              <label>
+                时间量子 s（可空）
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={jointQuantum}
+                  placeholder="缺省=单格通行时间"
+                  onChange={(event) => setJointQuantum(event.target.value)}
+                />
+              </label>
+              <label>
+                联合搜索预算
+                <input
+                  type="number"
+                  min="1"
+                  value={jointBudget}
+                  onChange={(event) => setJointBudget(Number(event.target.value))}
+                />
+              </label>
+              <button disabled={busy} onClick={handleJointPlan}>联合规划</button>
+              {jointResult && (
+                <div className={jointResult.status === "feasible" ? "pass" : jointResult.status === "infeasible" ? "fail" : "unknown"}>
+                  <strong>
+                    {jointResult.status === "feasible"
+                      ? "联合可行"
+                      : jointResult.status === "infeasible"
+                        ? "证实无解"
+                        : "预算不足（未证明）"}
+                  </strong>
+                  <p>{jointResult.reason}</p>
+                  <small>
+                    已评估 {jointResult.evaluated_combinations}/{jointResult.total_combinations} 种出发组合；
+                    单条路线可行：
+                    {Object.entries(jointResult.single_feasible)
+                      .map(([id, ok]) => id + "=" + (ok ? "可行" : "不可行"))
+                      .join("，")}
+                  </small>
+                  {jointResult.candidates.map((candidate) => (
+                    <div key={candidate.objective} className="zone-row">
+                      <span>
+                        {candidate.objective === "min_total_wait" ? "总等待最少" : "最晚完成最小"}
+                        {candidate.provisional ? "（部分结果）" : ""}：出发
+                        {Object.entries(candidate.departures)
+                          .map(([id, t]) => " " + id + "@" + t.toFixed(1) + "s")
+                          .join("，")}
+                        ；总等待 {candidate.total_wait.toFixed(1)}s，最晚完成 {candidate.makespan.toFixed(1)}s
+                      </span>
+                      {candidate.candidate_id !== undefined && (
+                        <button
+                          onClick={() => {
+                            const commitments: Record<string, number> = {};
+                            try {
+                              const tasks = JSON.parse(jointTasksText || defaultJointTasks());
+                              for (const taskItem of tasks) {
+                                if (taskItem.committed && taskItem.committed_departure != null) {
+                                  commitments[taskItem.id] = taskItem.committed_departure;
+                                }
+                              }
+                            } catch {
+                              // 任务 JSON 无法解析时按空承诺提交，由服务端核对拒绝
+                            }
+                            handleAdoptJoint(candidate.candidate_id as number, commitments);
+                          }}
+                        >
+                          采用
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {savedJoint.length > 0 && (
+                <details>
+                  <summary>已保存候选（{savedJoint.length}）</summary>
+                  <ul className="versions">
+                    {savedJoint.map((record) => (
+                      <li key={record.id}>
+                        <span>
+                          {record.objective}
+                          <small>
+                            {record.valid
+                              ? record.adopted_at
+                                ? "已采用"
+                                : "有效"
+                              : "已失效：" + (record.invalid_reason ?? "未知")}
+                          </small>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
               )}
             </section>
           </aside>

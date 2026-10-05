@@ -89,3 +89,51 @@ class PassageRequestModel(BaseModel):
     keep_geometry: bool = False
     geometric_path: list[dict] | None = None
     search_budget: int = Field(default=1_500_000, gt=0)
+
+
+class JointTaskModel(BaseModel):
+    """联合出发规划中的单条任务路线。
+
+    committed=True 表示已承诺任务：出发时刻不可移动，仅作为约束参与核对。
+    """
+
+    id: str
+    start: PointModel
+    end: PointModel
+    start_orientation: float = 0.0
+    end_orientation: float | None = None
+    linear_speed: float | None = Field(default=None, gt=0)
+    angular_speed: float | None = Field(default=None, gt=0)
+    robot_width: float | None = Field(default=None, gt=0)
+    robot_length: float | None = Field(default=None, gt=0)
+    earliest_departure: float = Field(default=0.0, ge=0)
+    latest_departure: float = Field(default=0.0, ge=0)
+    committed: bool = False
+    committed_departure: float | None = Field(default=None, ge=0)
+
+    @field_validator("latest_departure")
+    @classmethod
+    def _latest_after_earliest(cls, value, info):
+        earliest = info.data.get("earliest_departure", 0.0)
+        if value < earliest:
+            raise ValueError("latest departure precedes earliest departure")
+        return value
+
+    @field_validator("committed_departure")
+    @classmethod
+    def _committed_has_departure(cls, value, info):
+        if info.data.get("committed") and value is None:
+            raise ValueError("committed task requires committed_departure")
+        return value
+
+
+class JointPlanRequestModel(BaseModel):
+    tasks: list[JointTaskModel] = Field(min_length=2)
+    time_quantum: float | None = Field(default=None, gt=0)
+    search_budget: int = Field(default=200_000, gt=0)
+
+
+class JointAdoptModel(BaseModel):
+    """采用候选时重新提交当前承诺，服务端与保存时的承诺逐一核对。"""
+
+    commitments: dict[str, float] = Field(default_factory=dict)

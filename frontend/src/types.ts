@@ -144,3 +144,70 @@ export type PlanReplay = {
   current_map_version?: string;
   robot_params?: Record<string, number>;
 };
+
+export type JointTask = {
+  id: string;
+  start: Point;
+  end: Point;
+  start_orientation?: number;
+  end_orientation?: number | null;
+  linear_speed?: number | null;
+  angular_speed?: number | null;
+  robot_width?: number | null;
+  robot_length?: number | null;
+  earliest_departure: number;
+  latest_departure: number;
+  committed: boolean;
+  committed_departure?: number | null;
+};
+
+export type JointCandidate = {
+  candidate_id?: number;
+  objective: "min_total_wait" | "min_makespan";
+  departures: Record<string, number>;
+  total_wait: number;
+  makespan: number;
+  conflict_free: boolean;
+  provisional?: boolean;
+  tasks: Record<
+    string,
+    {
+      departure: number;
+      arrival_time: number;
+      wait: number;
+      status: string;
+      segments: Segment[];
+    }
+  >;
+};
+
+export type JointPlanResult = {
+  status: "feasible" | "infeasible" | "search_incomplete";
+  reason: string;
+  algorithm?: string;
+  search_completed: boolean;
+  evaluated_combinations: number;
+  total_combinations: number;
+  time_quantum: number;
+  single_feasible: Record<string, boolean>;
+  candidates: JointCandidate[];
+  rejection?: {
+    task_failure_combinations: number;
+    conflict_combinations: number;
+    sample_task_failure?: Record<string, unknown> | null;
+    sample_conflict?: Record<string, unknown> | null;
+  };
+  map_fingerprint?: string;
+};
+
+export type SavedJointCandidate = {
+  id: number;
+  objective: string;
+  created_at: string;
+  adopted_at: string | null;
+  result: JointCandidate;
+  task_ids: string[];
+  commitments: Record<string, number>;
+  valid: boolean;
+  invalid_reason: string | null;
+};

@@ -73,3 +73,24 @@ export async function restoreVersion(
 ): Promise<{ state: MapState; state_defaults?: string[] }> {
   return jsonFetch(`/api/versions/${versionId}/restore`, { method: "POST" });
 }
+
+export const planJoint = (
+  id: number,
+  body: { tasks: unknown[]; time_quantum?: number | null; search_budget?: number },
+): Promise<import("./types").JointPlanResult> =>
+  jsonFetch(`/api/projects/${id}/joint-plan`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const listJointPlans = (id: number): Promise<import("./types").SavedJointCandidate[]> =>
+  jsonFetch(`/api/projects/${id}/joint-plans`);
+
+export const adoptJointCandidate = (
+  candidateId: number,
+  commitments: Record<string, number>,
+) =>
+  jsonFetch(`/api/joint-plans/${candidateId}/adopt`, {
+    method: "POST",
+    body: JSON.stringify({ commitments }),
+  });

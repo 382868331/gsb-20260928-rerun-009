@@ -153,13 +153,14 @@ def _move_free(free: np.ndarray, direction: tuple[int, int]) -> np.ndarray:
     source center must also be valid when shifted by the movement vector.
     """
     dr, dc = direction
-    # Source ranges that keep the destination inside the grid.
-    src_r_min = max(0, -dr)
-    src_r_max = min(free.shape[1], free.shape[1] - dr)
-    src_c_min = max(0, -dc)
-    src_c_max = min(free.shape[2], free.shape[2] - dc)
-    dst_r_min, dst_r_max = src_r_min + dr, src_r_max + dr
-    dst_c_min, dst_c_max = src_c_min + dc, src_c_max + dc
+    # 源中心 c 沿 direction 平移一格的扫掠覆盖 c 与 c+direction 两端，
+    # 因此需要 c 与 c+direction 都可行；邻居数组把自由格向 -direction 挪一位。
+    src_r_min = max(0, dr)
+    src_r_max = min(free.shape[1], free.shape[1] + dr)
+    src_c_min = max(0, dc)
+    src_c_max = min(free.shape[2], free.shape[2] + dc)
+    dst_r_min, dst_r_max = src_r_min - dr, src_r_max - dr
+    dst_c_min, dst_c_max = src_c_min - dc, src_c_max - dc
     shifted = np.zeros_like(free)
     shifted[:, dst_r_min:dst_r_max, dst_c_min:dst_c_max] = free[
         :, src_r_min:src_r_max, src_c_min:src_c_max

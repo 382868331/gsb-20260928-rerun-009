@@ -42,6 +42,19 @@ class Store:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES projects(id)
                 );
+                CREATE TABLE IF NOT EXISTS joint_plans (
+                    id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    objective TEXT NOT NULL,
+                    request TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    task_ids TEXT NOT NULL,
+                    commitments TEXT NOT NULL,
+                    map_fingerprint TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    adopted_at TEXT,
+                    FOREIGN KEY(project_id) REFERENCES projects(id)
+                );
                 CREATE TABLE IF NOT EXISTS plans (
                     id INTEGER PRIMARY KEY,
                     project_id INTEGER NOT NULL,
@@ -208,6 +221,62 @@ class Store:
     def get_plan(self, plan_id: int) -> sqlite3.Row | None:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
+
+    def save_joint_candidate(
+        self,
+        project_id: int,
+        objective: str,
+        request: dict[str, Any],
+        result: dict[str, Any],
+        task_ids: list[str],
+        commitments: dict[str, float],
+        map_fingerprint: str,
+    ) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO joint_plans
+                (project_id, objective, request, result, task_ids,
+                 commitments, map_fingerprint, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    objective,
+                    json.dumps(request, ensure_ascii=False),
+                    json.dumps(result, ensure_ascii=False),
+                    json.dumps(task_ids, ensure_ascii=False),
+                    json.dumps(commitments, ensure_ascii=False),
+                    map_fingerprint,
+                    utc_now(),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def list_joint_candidates(self, project_id: int) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return list(
+                conn.execute(
+                    """
+                    SELECT * FROM joint_plans WHERE project_id = ?
+                    ORDER BY id DESC LIMIT 20
+                    """,
+                    (project_id,),
+                ).fetchall()
+            )
+
+    def get_joint_candidate(self, candidate_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM joint_plans WHERE id = ?", (candidate_id,)
+            ).fetchone()
+
+    def mark_joint_adopted(self, candidate_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE joint_plans SET adopted_at = ? WHERE id = ?",
+                (utc_now(), candidate_id),
+            )
 
     def restore_version(self, version_id: int) -> dict[str, Any] | None:
         version = self.get_version(version_id)

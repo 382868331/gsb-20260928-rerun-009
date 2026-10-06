@@ -54,9 +54,29 @@ class Store:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES projects(id)
                 );
+                CREATE TABLE IF NOT EXISTS joint_candidates (
+                    id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    request TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    map_fingerprint TEXT,
+                    commitment_hash TEXT,
+                    environment_hash TEXT,
+                    adopted INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(id)
+                );
                 """
             )
             self._migrate_plans(conn)
+            existing_joint = {
+                row["name"] for row in conn.execute("PRAGMA table_info(joint_candidates)")
+            }
+            for column in ("commitment_hash", "environment_hash", "map_fingerprint"):
+                if column not in existing_joint:
+                    conn.execute(
+                        f"ALTER TABLE joint_candidates ADD COLUMN {column} TEXT"
+                    )
 
     def _migrate_plans(self, conn: sqlite3.Connection) -> None:
         """老库可能缺少地图快照列；按需补齐，缺列绝不被解释成新结论。"""
@@ -220,6 +240,59 @@ class Store:
                 (version["state"], utc_now(), version["project_id"]),
             )
         return state
+
+    def save_joint_candidate(
+        self,
+        project_id: int,
+        request: dict[str, Any],
+        result: dict[str, Any],
+        map_fingerprint: str | None,
+        commitment_hash: str | None,
+        environment_hash: str | None,
+    ) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO joint_candidates
+                (project_id, request, result, map_fingerprint, commitment_hash, environment_hash, adopted, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+                """,
+                (
+                    project_id,
+                    json.dumps(request, ensure_ascii=False),
+                    json.dumps(result, ensure_ascii=False),
+                    map_fingerprint,
+                    commitment_hash,
+                    environment_hash,
+                    utc_now(),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def list_joint_candidates(self, project_id: int) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return list(
+                conn.execute(
+                    """
+                    SELECT id, project_id, request, result, map_fingerprint,
+                           commitment_hash, environment_hash, adopted, created_at
+                    FROM joint_candidates WHERE project_id = ? ORDER BY id DESC LIMIT 20
+                    """,
+                    (project_id,),
+                ).fetchall()
+            )
+
+    def get_joint_candidate(self, candidate_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM joint_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+
+    def mark_joint_adopted(self, candidate_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE joint_candidates SET adopted = 1 WHERE id = ?", (candidate_id,)
+            )
 
 
 def map_fingerprint(grid: list[list[bool]], resolution: float, state: dict[str, Any]) -> str:

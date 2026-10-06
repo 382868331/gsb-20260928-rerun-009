@@ -9,8 +9,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 from .geometry import validate_passage
+from .joint import commitment_hash, environment_hash, plan_joint
 from .maps import image_to_grid, make_sample_map
-from .models import PassageRequestModel, ProjectUpdateModel, VersionCreateModel
+from .models import (
+    JointAdoptModel,
+    JointPlanRequestModel,
+    PassageRequestModel,
+    ProjectUpdateModel,
+    VersionCreateModel,
+)
 from .storage import Store, map_fingerprint
 
 
@@ -462,6 +469,137 @@ async def list_plans(project_id: int) -> list[dict[str, Any]]:
     if row is None:
         raise HTTPException(status_code=404, detail="project not found")
     return [load_plan_record(plan_row, row) for plan_row in store.list_plans(project_id)]
+
+
+def _joint_fingerprint(row) -> str:
+    grid = json.loads(row["map_data"])["grid"]
+    return map_fingerprint(grid, row["resolution"], {})
+
+
+def _serialize_joint_candidate(row, current_fingerprint: str | None) -> dict[str, Any]:
+    result = json.loads(row["result"])
+    request = json.loads(row["request"])
+    saved_map = row["map_fingerprint"]
+    map_changed = (
+        saved_map is not None
+        and current_fingerprint is not None
+        and saved_map != current_fingerprint
+    )
+    return {
+        "id": row["id"],
+        "created_at": row["created_at"],
+        "adopted": bool(row["adopted"]),
+        "status": result.get("status"),
+        "result": result,
+        "request": request,
+        "map_fingerprint": saved_map,
+        "current_map_fingerprint": current_fingerprint,
+        "commitment_hash": row["commitment_hash"],
+        "environment_hash": row["environment_hash"],
+        # 地图或承诺变化只使对应候选失效，不影响其他候选。
+        "stale": bool(map_changed),
+        "stale_reasons": (["map_changed"] if map_changed else []),
+    }
+
+
+@app.post("/api/projects/{project_id}/joint-plan")
+async def joint_plan(project_id: int, payload: JointPlanRequestModel) -> dict[str, Any]:
+    row = store.get_project(project_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    grid = json.loads(row["map_data"])["grid"]
+    tasks = [task.model_dump() for task in payload.tasks]
+    shared = [zone.model_dump() for zone in payload.shared_zones]
+    result = plan_joint(
+        grid=grid,
+        resolution=row["resolution"],
+        tasks=tasks,
+        shared_zones=shared,
+        search_budget=payload.search_budget,
+    )
+    fingerprint = _joint_fingerprint(row)
+    result["map_fingerprint"] = fingerprint
+    result["commitment_hash"] = commitment_hash(tasks)
+    result["environment_hash"] = environment_hash(tasks, shared)
+    candidate_id = None
+    if payload.save and result["status"] == "feasible":
+        # 候选只是保存的规划结果，不回写任何任务的原始状态。
+        candidate_id = store.save_joint_candidate(
+            project_id,
+            {"tasks": tasks, "shared_zones": shared},
+            result,
+            fingerprint,
+            result["commitment_hash"],
+            result["environment_hash"],
+        )
+    result["candidate_id"] = candidate_id
+    result["map_version"] = row["updated_at"]
+    return result
+
+
+@app.get("/api/projects/{project_id}/joint-candidates")
+async def list_joint_candidates(project_id: int) -> list[dict[str, Any]]:
+    row = store.get_project(project_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    fingerprint = _joint_fingerprint(row)
+    return [
+        _serialize_joint_candidate(candidate_row, fingerprint)
+        for candidate_row in store.list_joint_candidates(project_id)
+    ]
+
+
+@app.post("/api/joint-candidates/{candidate_id}/adopt")
+async def adopt_joint_candidate(candidate_id: int, payload: JointAdoptModel) -> dict[str, Any]:
+    record = store.get_joint_candidate(candidate_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="joint candidate not found")
+    row = store.get_project(record["project_id"])
+    if row is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    result = json.loads(record["result"])
+    objectives = {candidate["objective"] for candidate in result.get("candidates", [])}
+    if payload.candidate not in objectives:
+        raise HTTPException(status_code=400, detail="unknown candidate objective")
+    current_fingerprint = _joint_fingerprint(row)
+    tasks = [task.model_dump() for task in payload.tasks]
+    current_commitments = commitment_hash(tasks)
+    current_environment = environment_hash(
+        tasks, [zone.model_dump() for zone in payload.shared_zones]
+    )
+    failures = []
+    if record["map_fingerprint"] and record["map_fingerprint"] != current_fingerprint:
+        failures.append("map_changed")
+    if record["commitment_hash"] and record["commitment_hash"] != current_commitments:
+        failures.append("commitment_changed")
+    if record["environment_hash"] and record["environment_hash"] != current_environment:
+        failures.append("environment_changed")
+    if failures:
+        # 采用前重新核对：地图或已承诺任务变化时拒绝采用，只让该候选失效。
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "候选所依据的地图或已承诺任务已变化，请重新规划",
+                "failures": failures,
+            },
+        )
+    store.mark_joint_adopted(candidate_id)
+    chosen = next(
+        candidate
+        for candidate in result["candidates"]
+        if candidate["objective"] == payload.candidate
+    )
+    return {
+        "adopted": True,
+        "candidate_id": candidate_id,
+        "objective": payload.candidate,
+        "recheck": {
+            "map_fingerprint_ok": True,
+            "commitments_ok": True,
+            "environment_ok": True,
+        },
+        "candidate": chosen,
+    }
 
 
 @app.get("/api/plans/{plan_id}")

@@ -11,6 +11,7 @@ import {
   validateProject,
 } from "./api";
 import { MapCanvas } from "./MapCanvas";
+import { JointPlanner } from "./JointPlanner";
 import type {
   MapState,
   PlanReplay,
@@ -585,6 +586,7 @@ export default function App() {
                 </div>
               )}
             </section>
+            <JointPlanner projectId={project.id} state={state} />
           </aside>
           <div className="canvas-wrap">
             <MapCanvas project={project} state={state} scale={scale} result={result} onChange={setState} />

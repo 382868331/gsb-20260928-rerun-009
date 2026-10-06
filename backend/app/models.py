@@ -89,3 +89,36 @@ class PassageRequestModel(BaseModel):
     keep_geometry: bool = False
     geometric_path: list[dict] | None = None
     search_budget: int = Field(default=1_500_000, gt=0)
+
+
+class JointTaskModel(BaseModel):
+    """联合规划中的一条任务：已承诺任务出发时刻不可移动，其余在范围内滑动。"""
+
+    id: str
+    state: MapStateModel
+    committed: bool = False
+    departure: float | None = Field(default=None, ge=0)
+    adjust_start: float = Field(default=0.0, ge=0)
+    adjust_end: float = Field(default=0.0, ge=0)
+    adjust_step: float = Field(default=1.0, gt=0)
+
+    @field_validator("adjust_end")
+    @classmethod
+    def _end_after_start(cls, value, info):
+        start = info.data.get("adjust_start", 0.0)
+        if value < start:
+            raise ValueError("joint task adjust end precedes start")
+        return value
+
+
+class JointPlanRequestModel(BaseModel):
+    tasks: list[JointTaskModel] = Field(min_length=1)
+    shared_zones: list[ZoneModel] = Field(default_factory=list)
+    search_budget: int = Field(default=200_000, gt=0)
+    save: bool = True
+
+
+class JointAdoptModel(BaseModel):
+    candidate: str
+    tasks: list[JointTaskModel] = Field(min_length=1)
+    shared_zones: list[ZoneModel] = Field(default_factory=list)

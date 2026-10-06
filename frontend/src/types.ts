@@ -144,3 +144,49 @@ export type PlanReplay = {
   current_map_version?: string;
   robot_params?: Record<string, number>;
 };
+
+export type JointTask = {
+  id: string;
+  state: MapState;
+  committed: boolean;
+  departure?: number | null;
+  adjust_start: number;
+  adjust_end: number;
+  adjust_step: number;
+};
+
+export type JointCandidate = {
+  objective: string;
+  total_wait: number;
+  makespan: number;
+  tasks: Array<{
+    id: string;
+    departure: number;
+    arrival: number;
+    wait: number;
+    segments: Segment[];
+  }>;
+};
+
+export type JointPlanResult = {
+  status: string;
+  reason?: string;
+  algorithm?: string;
+  search_completed?: boolean;
+  combinations_evaluated?: number;
+  conflict_tally?: Record<string, number>;
+  candidate_id?: number | null;
+  candidates: JointCandidate[];
+  single: Array<{ id: string; committed: boolean; feasible_departures: number[] }>;
+};
+
+export type SavedJointCandidate = {
+  id: number;
+  created_at: string;
+  adopted: boolean;
+  status: string;
+  result: JointPlanResult;
+  request: { tasks: JointTask[]; shared_zones: ForbiddenZone[] };
+  stale: boolean;
+  stale_reasons: string[];
+};

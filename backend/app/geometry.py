@@ -818,6 +818,10 @@ def _timed_search(
                 # 窗口恰在等待结束时刻开启并通过检查点：提升进度后继续展开。
                 progress_key = (resume_progress, layer, row, col, 1)
                 progress = resume_progress
+            # 等待结束时进度已推进，下一道检查点应以推进后的进度为准；
+            # 不能沿用上一个弹出状态的 next_spec，否则通过检查点后反而
+            # 被误判为“未通过就离开容差区”而无法离开等待位。
+            gate_spec = specs[progress] if progress < len(specs) else None
             # 等待后的重新出发：只允许离开等待位，且出发时刻本身合法。
             for move_index, (dr, dc) in enumerate(moves):
                 next_row, next_col = row + dr, col + dc
@@ -836,10 +840,10 @@ def _timed_search(
                     progress, layer, next_row, next_col, specs, arrival
                 )
                 if (
-                    next_spec is not None
+                    gate_spec is not None
                     and new_progress == progress
-                    and not _inside_tolerance(next_row, next_col, next_spec)
-                    and _inside_tolerance(row, col, next_spec)
+                    and not _inside_tolerance(next_row, next_col, gate_spec)
+                    and _inside_tolerance(row, col, gate_spec)
                 ):
                     continue
                 relax(
@@ -1507,4 +1511,3 @@ def replay_segments(*, segments, specs, timed, move_cost, turn_cost):
         "checkpoint_times": checkpoint_hits,
         "segment_count": len(segments),
     }
-

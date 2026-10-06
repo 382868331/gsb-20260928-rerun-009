@@ -1,8 +1,12 @@
 import type {
+  ForbiddenZone,
+  JointPlanResult,
+  JointTask,
   MapState,
   PlanReplay,
   Point,
   Project,
+  SavedJointCandidate,
   SavedPlan,
   ValidationResult,
   Version,
@@ -61,6 +65,27 @@ export const getPlan = (planId: number): Promise<SavedPlan> =>
   jsonFetch(`/api/plans/${planId}`);
 export const replayPlan = (planId: number): Promise<PlanReplay> =>
   jsonFetch(`/api/plans/${planId}/replay`, { method: "POST" });
+export const jointPlan = (
+  id: number,
+  tasks: JointTask[],
+  sharedZones: ForbiddenZone[],
+): Promise<JointPlanResult> =>
+  jsonFetch(`/api/projects/${id}/joint-plan`, {
+    method: "POST",
+    body: JSON.stringify({ tasks, shared_zones: sharedZones }),
+  });
+export const listJointCandidates = (id: number): Promise<SavedJointCandidate[]> =>
+  jsonFetch(`/api/projects/${id}/joint-candidates`);
+export const adoptJointCandidate = (
+  candidateId: number,
+  objective: string,
+  tasks: JointTask[],
+  sharedZones: ForbiddenZone[],
+) =>
+  jsonFetch(`/api/joint-candidates/${candidateId}/adopt`, {
+    method: "POST",
+    body: JSON.stringify({ candidate: objective, tasks, shared_zones: sharedZones }),
+  });
 export const listVersions = (id: number): Promise<Version[]> =>
   jsonFetch(`/api/projects/${id}/versions`);
 export const saveVersion = (id: number, name: string, state: MapState) =>
